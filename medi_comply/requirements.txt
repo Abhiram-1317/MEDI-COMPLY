@@ -1,0 +1,44 @@
+# MEDI-COMPLY requirements
+# ========================
+# Core
+pydantic>=2.0
+pydantic-settings
+python-dotenv
+
+# Web framework
+fastapi
+uvicorn[standard]
+httpx
+python-multipart
+jinja2
+
+# LLM / Agents
+langchain>=0.2
+langchain-openai
+langchain-anthropic
+langgraph
+
+# Knowledge stores
+neo4j
+pinecone-client
+chromadb
+
+# NLP
+spacy
+scispacy
+medspacy
+
+# Logging
+structlog
+
+# Data layer
+redis
+sqlalchemy
+asyncpg
+
+# Testing
+pytest
+pytest-asyncio
+
+# Demo UI
+streamlit
