@@ -8,19 +8,258 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Iterable
 
-import streamlit as st
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import streamlit as st
+import yaml
+
+from medi_comply.audit.audit_models import AuditReport
+from medi_comply.audit.report_generator import AuditReportGenerator
 from medi_comply.demo_scenarios import DEMO_SCENARIOS
-from medi_comply.system import MediComplySystem, ProcessingError, SystemInitializationError
+from medi_comply.system import (
+    MediComplySystem,
+    ProcessingError,
+    SystemInitializationError,
+)
 
 
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap');
+:root {
+    --ink: #081226;
+    --ink-soft: rgba(8, 18, 38, 0.7);
+    --paper: #ffffff;
+    --frost: #f2f6ff;
+    --mist: #d5deff;
+    --line: rgba(8, 18, 38, 0.12);
+    --accent: #2563eb;
+    --accent-2: #0ea5e9;
+    --success: #16825d;
+    --danger: #b42318;
+}
+.stApp,
+body {
+    font-family: 'Sora', sans-serif;
+    background: radial-gradient(circle at top, #e3ecff, #f8fbff 60%);
+    color: var(--ink);
+}
+.main .block-container {
+    padding: 1.8rem 2rem 2.5rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    position: relative;
+}
+.main .block-container:before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 28px;
+    background: var(--paper);
+    box-shadow: 0 35px 80px rgba(15, 23, 42, 0.08);
+    z-index: -1;
+}
+.stSidebar > div {
+    background: rgba(255, 255, 255, 0.92);
+    border-right: 1px solid var(--line);
+    color: rgba(15, 23, 42, 0.95);
+    padding: 1.5rem 1.2rem;
+}
+.stSidebar h1,
+.stSidebar h2,
+.stSidebar h3,
+.stSidebar h4,
+.stSidebar h5,
+.stSidebar h6,
+.stSidebar p,
+.stSidebar label,
+.stSidebar .stMarkdown,
+.stSidebar .stCheckbox label,
+.stSidebar .stRadio label {
+    color: rgba(8, 18, 38, 0.92) !important;
+    font-weight: 600;
+}
+.stSelectbox div[data-baseweb="select"] > div,
+.stNumberInput input {
+    background: #0f172a;
+    color: #f8fafc;
+    border-radius: 16px;
+    border: none;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+.hero-banner {
+    border: 1px solid rgba(37, 99, 235, 0.15);
+    border-radius: 26px;
+    padding: 2rem 2.4rem;
+    background: linear-gradient(120deg, rgba(37, 99, 235, 0.11), rgba(14, 165, 233, 0.08));
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.8fr);
+    gap: 2rem;
+    margin-bottom: 2rem;
+    align-items: center;
+}
+.hero-left h1 {
+    margin: 0;
+    font-size: 2.6rem;
+    font-family: 'Space Grotesk', sans-serif;
+    letter-spacing: -0.02em;
+}
+.hero-left p {
+    color: var(--ink-soft);
+    margin-top: 0.6rem;
+}
+.hero-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1.2rem;
+}
+.hero-chip {
+    padding: 0.5rem 1rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85rem;
+    color: var(--ink);
+    font-weight: 600;
+}
+.hero-right {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+}
+.hero-stat {
+    background: rgba(255, 255, 255, 0.92);
+    border-radius: 18px;
+    padding: 1.2rem 1.4rem;
+    box-shadow: 0 15px 40px rgba(15, 23, 42, 0.12);
+}
+.hero-stat span {
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+}
+.hero-stat strong {
+    display: block;
+    font-size: 1.8rem;
+    margin-top: 0.35rem;
+}
+.metric-card {
+    background: var(--paper);
+    border: 1px solid rgba(8, 18, 38, 0.08);
+    border-radius: 20px;
+    padding: 1.15rem 1.35rem;
+    min-height: 118px;
+    box-shadow: 0 22px 45px rgba(15, 23, 42, 0.08);
+    transition: transform 180ms ease, box-shadow 180ms ease;
+}
+.metric-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 28px 65px rgba(15, 23, 42, 0.12);
+}
+.metric-label {
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.metric-value {
+    font-size: 1.7rem;
+    font-weight: 600;
+    margin: 0.35rem 0;
+}
+.metric-subtitle {
+    font-size: 0.9rem;
+    color: rgba(8, 18, 38, 0.65);
+}
+.yaml-card {
+    background: #0f172a;
+    border-radius: 20px;
+    padding: 1.3rem;
+    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    font-size: 0.84rem;
+    color: #e2e8f0;
+    white-space: pre-wrap;
+    line-height: 1.5;
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.2);
+}
+.stTextArea textarea {
+    border-radius: 22px;
+    border: 1px solid rgba(8, 18, 38, 0.2);
+    background: #ffffff;
+    color: var(--ink);
+    font-size: 0.98rem;
+    line-height: 1.55;
+    font-weight: 500;
+    min-height: 340px;
+    box-shadow: inset 0 15px 35px rgba(15, 23, 42, 0.05);
+}
+.stTextArea textarea::placeholder {
+    color: rgba(8, 18, 38, 0.5);
+}
+.stButton button {
+    border-radius: 999px;
+    border: none;
+    padding: 1rem 1.4rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    background: linear-gradient(120deg, #111c44, #020617);
+    color: #f8fafc;
+    transition: transform 200ms ease, box-shadow 200ms ease;
+    box-shadow: 0 25px 45px rgba(2, 6, 23, 0.35);
+}
+.stButton button:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow: 0 30px 55px rgba(2, 6, 23, 0.45);
+}
+.pass-badge {
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--accent);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.fail-badge {
+    background: rgba(180, 35, 24, 0.12);
+    color: var(--danger);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.stDownloadButton button {
+    border-radius: 18px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    background: var(--paper);
+    color: var(--ink);
+    transition: border 150ms ease, color 150ms ease;
+}
+.stDownloadButton button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+@media (max-width: 1100px) {
+    .hero-banner {
+        grid-template-columns: 1fr;
+    }
+    .hero-right {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 768px) {
+    .main .block-container {
+        padding: 1.1rem;
+    }
+    .hero-right {
+        grid-template-columns: 1fr;
+    }
+    .stTextArea textarea {
+        min-height: 260px;
+    }
+}
+</style>
+"""
 
 
 def safe_get(obj: Any, path: str | Iterable[str] | None = None, default: Any = "N/A") -> Any:
@@ -92,6 +331,9 @@ def load_system() -> MediComplySystem:
     return system
 
 
+PDF_GENERATOR = AuditReportGenerator()
+
+
 # ---------------------------------------------------------------------------
 # Streamlit layout helpers
 # ---------------------------------------------------------------------------
@@ -122,6 +364,21 @@ def render_health_panel(system: MediComplySystem | None) -> dict[str, Any]:
     return health_snapshot
 
 
+def metric_card(title: str, value: str, subtitle: str = "") -> None:
+    """Render a custom metric tile with consistent styling."""
+    subtitle_html = f'<span class="metric-subtitle">{subtitle}</span>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <span class="metric-label">{title}</span>
+            <div class="metric-value">{value}</div>
+            {subtitle_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_result(
     result: Any,
     elapsed: float,
@@ -145,7 +402,6 @@ def render_result(
         st.error(f"❌ Error | {status} | Trace: {trace_label}")
 
     st.markdown("---")
-    metric_cols = st.columns(5)
     coding_result = safe_get(result, "coding_result", None)
     compliance_report = safe_get(result, "compliance_report", None)
     risk_assessment = safe_get(result, "risk_assessment", None)
@@ -157,11 +413,17 @@ def render_result(
     comp_passed = safe_get(compliance_report, "checks_passed", 0) or 0
     comp_total = safe_get(compliance_report, "total_checks_run", 0) or 0
 
-    metric_cols[0].metric("Codes Assigned", total_codes)
-    metric_cols[1].metric("Confidence", format_percent(confidence))
-    metric_cols[2].metric("Risk Score", f"{format_float(risk_score)} ({risk_level})")
-    metric_cols[3].metric("Compliance", f"{comp_passed}/{comp_total}")
-    metric_cols[4].metric("Processing", f"{elapsed:.1f}s")
+    metric_cols = st.columns(5)
+    metric_payload = [
+        ("Codes Assigned", str(total_codes), "Dx + procedures"),
+        ("Confidence", format_percent(confidence), "Model certainty"),
+        ("Risk Score", format_float(risk_score), risk_level),
+        ("Compliance", f"{comp_passed}/{comp_total}", "Guardrail checks"),
+        ("Processing", f"{elapsed:.1f}s", "End-to-end"),
+    ]
+    for column, data in zip(metric_cols, metric_payload):
+        with column:
+            metric_card(*data)
 
     st.markdown("---")
     st.markdown("### 🏷️ Assigned Diagnosis Codes")
@@ -287,7 +549,27 @@ def render_result(
             message = safe_get(err, "error_message", None)
             st.error(message if message not in (None, "N/A") else str(err))
 
-    with st.expander("📦 Raw JSON Output"):
+    audit_report_raw = safe_get(result, "audit_report_full", None)
+    if audit_report_raw and audit_report_raw != "N/A":
+        try:
+            audit_report = (
+                audit_report_raw
+                if isinstance(audit_report_raw, AuditReport)
+                else AuditReport.model_validate(audit_report_raw)
+            )
+            pdf_bytes = PDF_GENERATOR.export_pdf(audit_report)
+            file_stub = audit_report.report_id or (trace_value or "medi-comply-report")
+            st.download_button(
+                label="🧾 Download audit PDF",
+                data=pdf_bytes,
+                file_name=f"{file_stub}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception as pdf_error:  # pragma: no cover - UI only
+            st.warning(f"PDF export unavailable: {pdf_error}")
+
+    with st.expander("📦 Result Snapshot (YAML)"):
         payload: Any = {"detail": "Not available"}
         try:
             if hasattr(result, "model_dump"):
@@ -296,7 +578,9 @@ def render_result(
                 payload = dict(result.__dict__)
         except Exception as serialization_error:  # pragma: no cover - UI only
             payload = {"error": f"Serialization failed: {serialization_error}"}
-        st.json(payload)
+
+        yaml_text = yaml.safe_dump(payload, sort_keys=False, indent=2, default_flow_style=False)
+        st.code(yaml_text, language="yaml")
 
 
 def render_footer() -> None:
@@ -313,18 +597,39 @@ def render_footer() -> None:
 
 
 st.set_page_config(page_title="MEDI-COMPLY Demo", page_icon="🏥", layout="wide")
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
 st.markdown(
     """
-    <style>
-        .pass-badge {background:#0f996d; color:white; padding:6px 10px; border-radius:6px; font-weight:600;}
-        .fail-badge {background:#a82a2a; color:white; padding:6px 10px; border-radius:6px; font-weight:600;}
-    </style>
+    <div class="hero-banner">
+        <div class="hero-left">
+            <p style="margin:0; text-transform:uppercase; letter-spacing:0.2em; font-size:0.78rem; color:rgba(8,18,38,0.6);">Multi-agent clinical coding</p>
+            <h1>MEDI-COMPLY Workbench</h1>
+            <p>Realtime ICD/CPT assignments with layered guardrails, audit-grade evidence capture, and local LLM compatibility.</p>
+            <div class="hero-chips">
+                <span class="hero-chip">ICD-10 + CPT orchestration</span>
+                <span class="hero-chip">Deterministic fallback</span>
+                <span class="hero-chip">Audit-ready outputs</span>
+            </div>
+        </div>
+        <div class="hero-right">
+            <div class="hero-stat">
+                <span>Compliance checks</span>
+                <strong>23 layers</strong>
+            </div>
+            <div class="hero-stat">
+                <span>Avg processing</span>
+                <strong>12 s</strong>
+            </div>
+            <div class="hero-stat">
+                <span>Evidence links</span>
+                <strong>40+</strong>
+            </div>
+        </div>
+    </div>
     """,
     unsafe_allow_html=True,
 )
-
-st.title("MEDI-COMPLY Clinical Coding Workbench")
-st.caption("Multi-agent clinical coding with compliance guardrails and full audit trail.")
 
 try:
     system_instance = load_system()
@@ -336,7 +641,11 @@ except (SystemInitializationError, RuntimeError) as exc:  # pragma: no cover - U
 with st.sidebar:
     st.header("Scenario Controls")
     scenario_names = list(DEMO_SCENARIOS.keys())
-    default_index = scenario_names.index("🫀 Cardiac NSTEMI (Complex)") if "🫀 Cardiac NSTEMI (Complex)" in scenario_names else 0
+    default_index = (
+        scenario_names.index("🫀 Cardiac NSTEMI (Complex)")
+        if "🫀 Cardiac NSTEMI (Complex)" in scenario_names
+        else 0
+    )
     scenario_name = st.selectbox("Choose demo scenario", scenario_names, index=default_index)
     scenario = DEMO_SCENARIOS.get(scenario_name) or next(iter(DEMO_SCENARIOS.values()))
     st.caption(scenario.get("description", ""))
@@ -357,7 +666,9 @@ with st.sidebar:
 
     encounter_options = ["INPATIENT", "OUTPATIENT", "EMERGENCY"]
     encounter_default = str(patient_defaults.get("encounter_type", "INPATIENT")).upper()
-    encounter_index = encounter_options.index(encounter_default) if encounter_default in encounter_options else 0
+    encounter_index = (
+        encounter_options.index(encounter_default) if encounter_default in encounter_options else 0
+    )
     encounter = st.selectbox("Encounter type", options=encounter_options, index=encounter_index)
 
     st.markdown("---")

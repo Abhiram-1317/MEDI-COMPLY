@@ -244,7 +244,28 @@ class LLMClient:
                     "options": {"temperature": temperature, "num_predict": max_tokens},
                 },
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    legacy_prompt = system_prompt + "\n\n" + adjusted_prompt if system_prompt else adjusted_prompt
+                    legacy_resp = await http.post(
+                        f"{base}/api/generate",
+                        json={
+                            "model": self.model,
+                            "prompt": legacy_prompt,
+                            "stream": False,
+                            "options": {"temperature": temperature, "num_predict": max_tokens},
+                        },
+                    )
+                    legacy_resp.raise_for_status()
+                    data = legacy_resp.json()
+                    return {
+                        "content": data.get("response", ""),
+                        "prompt_tokens": data.get("prompt_eval_count", 0),
+                        "completion_tokens": data.get("eval_count", 0),
+                    }
+                raise
             data = response.json()
             message = data.get("message", {})
             return {

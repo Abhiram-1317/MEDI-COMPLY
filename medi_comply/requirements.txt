@@ -17,6 +17,7 @@ langchain>=0.2
 langchain-openai
 langchain-anthropic
 langgraph
+fpdf2
 
 # Knowledge stores
 neo4j

@@ -99,12 +99,24 @@ class MedicalCodingAgent(BaseAgent):
             self._logger.warning("LLMClient unavailable; falling back to deterministic rules")
             return None
 
-        if os.environ.get("OPENAI_API_KEY"):
-            return LLMClient(provider="openai")
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            return LLMClient(provider="anthropic")
+        llm_cfg = getattr(self.config, "llm", None)
+        model_name = getattr(llm_cfg, "model_name", None)
+        timeout_seconds = getattr(llm_cfg, "timeout_seconds", 60)
+        api_key = getattr(llm_cfg, "api_key", "") or None
+
+        client_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "timeout_seconds": timeout_seconds,
+        }
+        if api_key:
+            client_kwargs["api_key"] = api_key
+
+        if os.environ.get("OPENAI_API_KEY") or api_key:
+            return LLMClient(provider="openai", **client_kwargs)
+        if os.environ.get("ANTHROPIC_API_KEY") or api_key:
+            return LLMClient(provider="anthropic", **client_kwargs)
         if os.environ.get("OLLAMA_URL"):
-            return LLMClient(provider="ollama", base_url=os.environ["OLLAMA_URL"])
+            return LLMClient(provider="ollama", base_url=os.environ["OLLAMA_URL"], **client_kwargs)
 
         self._logger.warning("No LLM API credentials detected. Using rule-based fallback only.")
         return None

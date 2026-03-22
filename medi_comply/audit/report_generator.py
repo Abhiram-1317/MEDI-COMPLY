@@ -6,20 +6,28 @@ and machine-readable audit reports that demonstrate the full
 transparency and reasoning behind every AI coding decision.
 
 Report formats produced:
-  1. Executive Summary — High-level overview for managers/auditors
-  2. Detailed Code Cards — Per-code reasoning and evidence
-  3. Processing Timeline — Chronological pipeline breakdown
-  4. Compliance Certificate — Formal attestation of compliance
-  5. Court-Admissible Narrative — Legal defence documentation
-  6. JSON Export — Machine-readable for downstream systems
+    1. Executive Summary — High-level overview for managers/auditors
+    2. Detailed Code Cards — Per-code reasoning and evidence
+    3. Processing Timeline — Chronological pipeline breakdown
+    4. Compliance Certificate — Formal attestation of compliance
+    5. Court-Admissible Narrative — Legal defence documentation
+    6. JSON Export — Machine-readable for downstream systems
 """
 
+import json
 from datetime import datetime, timezone
-from typing import Optional
+from io import BytesIO
+from pathlib import Path
+from typing import Optional, Union
 from medi_comply.audit.audit_models import (
-    WorkflowTrace, AuditReport, CodeDecisionRecord,
-    EvidenceMap, AuditRiskAssessment, EvidenceLinkRecord,
-    RetryRecord, LLMInteractionRecord,
+    WorkflowTrace,
+    AuditReport,
+    CodeDecisionRecord,
+    EvidenceMap,
+    AuditRiskAssessment,
+    EvidenceLinkRecord,
+    RetryRecord,
+    LLMInteractionRecord,
 )
 from medi_comply.audit.risk_scorer import AuditRiskScorer
 from medi_comply.core.utils import safe_get_code, safe_get_confidence, safe_get_text
@@ -336,15 +344,10 @@ Chain:       VALID ✅
 
         # Footer
         card_lines.append("└" + "─" * _BOX_WIDTH + "┘")
-        code_value = safe_get_code(c) or c.code
-        description = safe_get_text(c) or c.description
-        conf_value = safe_get_confidence(c, getattr(c, "confidence_score", 0.0))
-
-        desc_trunc = description[: _BOX_WIDTH - 4]
+        return "\n".join(card_lines)
 
     def format_retry_history(self, retries: list[RetryRecord]) -> str:
-        conf_str = f"{conf_value * 100:.0f}%"
-        and code-change deltas for each attempt."""
+        """Summarize retry attempts, feedback, and code diffs."""
         if not retries:
             return "No retries were required.\n"
 
@@ -606,3 +609,156 @@ Chain:       VALID ✅
             f"{t.compliance_stage.checks_passed}/{t.compliance_stage.total_checks_run} checks | "
             f"{'⚠️ REVIEW' if out.human_review_required else '✅ AUTO'}"
         )
+
+    # ── PDF export ───────────────────────────────────────
+
+    def export_pdf(
+        self,
+        report: AuditReport,
+        target: Union[str, Path, BytesIO, None] = None,
+    ) -> bytes:
+        """Render the supplied ``AuditReport`` as a PDF document.
+
+        Parameters
+        ----------
+        report:
+            The :class:`AuditReport` instance to render.
+        target:
+            Optional filesystem path or writable binary buffer. When ``None``
+            the PDF bytes are simply returned.
+        """
+
+        try:
+            from fpdf import FPDF  # type: ignore
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "fpdf2 is required for PDF export. Install it via `pip install fpdf2`."
+            ) from exc
+
+        pdf = FPDF(format="A4")
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        max_line_width = getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin)
+
+        def write_chunk(text: str) -> None:
+            target = text or " "
+            try:
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 5, target)
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                measured = pdf.get_string_width(target)
+                raise RuntimeError(
+                    f"Failed to render PDF chunk {target!r} (width={measured:.2f}, limit={max_line_width:.2f})"
+                ) from exc
+
+        def emit_wrapped_line(raw_text: str) -> None:
+            sanitized = self._sanitize_for_pdf(raw_text or " ") or " "
+            buffer = ""
+            for char in sanitized:
+                candidate = buffer + char
+                overflows = pdf.get_string_width(candidate) > max_line_width
+                if buffer and overflows:
+                    write_chunk(buffer)
+                    buffer = char
+                elif not buffer and overflows:
+                    write_chunk(char)
+                    buffer = ""
+                else:
+                    buffer = candidate
+            if buffer:
+                write_chunk(buffer)
+
+        def write_section(title: str, content: Union[str, list[str]]) -> None:
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.cell(0, 8, self._sanitize_for_pdf(title), ln=True)
+            pdf.set_draw_color(220, 220, 220)
+            pdf.set_line_width(0.2)
+            pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+            pdf.ln(2)
+            pdf.set_font("Courier", size=9)
+            lines = content.splitlines() if isinstance(content, str) else content
+            if not lines:
+                lines = ["(no data)"]
+            for line in lines:
+                emit_wrapped_line(line)
+            pdf.ln(4)
+
+        write_section("Executive Summary", report.summary)
+        write_section("Compliance Overview", report.compliance_summary)
+        write_section(
+            "Risk Assessment",
+            self._format_risk_section_lines(report.risk_assessment),
+        )
+        write_section(
+            "Evidence Summary",
+            self._format_evidence_summary(report.evidence_map_summary),
+        )
+
+        for idx, card in enumerate(report.code_explanations, start=1):
+            write_section(f"Code Explanation #{idx}", card)
+
+        write_section("Compliance Certificate", report.compliance_certificate)
+        json_preview = json.dumps(report.json_export, indent=2)[:4000]
+        write_section("JSON Export Snapshot", json_preview)
+
+        pdf_output = pdf.output(dest="S")
+        if isinstance(pdf_output, (bytes, bytearray)):
+            payload = bytes(pdf_output)
+        else:
+            payload = str(pdf_output).encode("latin-1")
+
+        if isinstance(target, (str, Path)):
+            Path(target).write_bytes(payload)
+        elif isinstance(target, BytesIO):
+            target.write(payload)
+        elif target is not None:
+            target.write(payload)  # type: ignore[attr-defined]
+
+        return payload
+
+    @staticmethod
+    def _sanitize_for_pdf(text: Optional[str]) -> str:
+        if text is None:
+            return ""
+        return text.encode("latin-1", "replace").decode("latin-1")
+
+    def _format_risk_section_lines(
+        self, assessment: AuditRiskAssessment
+    ) -> list[str]:
+        lines = [
+            f"Overall Score: {assessment.overall_score:.2f}",
+            f"Risk Level: {assessment.risk_level}",
+            f"Audit Priority: {assessment.audit_priority}",
+        ]
+        if assessment.risk_factors_triggered:
+            lines.append("Risk Factors:")
+            for factor in assessment.risk_factors_triggered:
+                label = factor.get("name") or factor.get("factor") or "Factor"
+                detail = factor.get("detail") or factor.get("reason") or ""
+                lines.append(f"  - {label}: {detail}")
+        if assessment.recommendations:
+            lines.append("Recommendations:")
+            for rec in assessment.recommendations:
+                lines.append(f"  • {rec}")
+        return lines
+
+    def _format_evidence_summary(self, summary: dict) -> list[str]:
+        if not summary:
+            return ["Evidence summary not available."]
+
+        lines = []
+        coverage = summary.get("coverage")
+        if isinstance(coverage, (int, float)):
+            lines.append(f"Coverage: {coverage * 100:.0f}%")
+        linked = summary.get("linked_codes")
+        if linked is not None:
+            lines.append(f"Linked Codes: {linked}")
+        unlinked_codes = summary.get("unlinked_codes")
+        if unlinked_codes is not None:
+            lines.append(f"Unlinked Codes: {unlinked_codes}")
+        unlinked_evidence = summary.get("unlinked_evidence")
+        if unlinked_evidence is not None:
+            lines.append(f"Unlinked Evidence: {unlinked_evidence}")
+        if not lines:
+            lines.append(str(summary))
+        return lines

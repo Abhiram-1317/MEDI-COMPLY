@@ -117,9 +117,13 @@ class AuditTrailAgent(BaseAgent):
             llm_interactions,
         )
 
-        # Persist the trace in the immutable store
-        self.audit_store.store(trace)
-        self._records_stored += 1
+        # Persist the trace in the immutable store when we actually have one
+        completion_detail = "Audit record signed and stored in immutable ledger"
+        if trace:
+            self.audit_store.store(trace)
+            self._records_stored += 1
+        else:
+            completion_detail = "No coding result available; audit record not stored"
 
         # Advance state machine through required transitions
         self.transition_state(AgentState.PROPOSING)
@@ -127,7 +131,7 @@ class AuditTrailAgent(BaseAgent):
         self.transition_state(AgentState.APPROVED)
         self.transition_state(
             AgentState.COMPLETED,
-            {"detail": "Audit record signed and stored in immutable ledger"},
+            {"detail": completion_detail},
         )
 
         return AgentResponse(
