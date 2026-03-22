@@ -225,6 +225,12 @@ class ModelRegistry:
             ),
         }
 
+    @property
+    def registry(self) -> Dict[str, ModelConfig]:
+        """Return the underlying registry dictionary (read-only use)."""
+
+        return dict(self._registry)
+
     def is_approved(self, model_name: str) -> bool:
         return model_name in self._registry
 
@@ -239,6 +245,13 @@ class ModelRegistry:
             candidates = [c for c in candidates if c.supports_json_mode]
         key_fn = lambda cfg: cfg.medical_domain_score
         return sorted(candidates, key=key_fn, reverse=True)[0]
+
+
+    # Module-level registry instance for convenience/DI-free contexts.
+    MODEL_REGISTRY = ModelRegistry()
+    # Backward-compatible enum aliases to satisfy alternate naming expectations.
+    UseCaseType = UseCase
+    EnvironmentType = Environment
 
 
 class ModelSelectionGuard:
