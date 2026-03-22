@@ -7,6 +7,7 @@ NCCI edits, medical necessity rules, coding guidelines, and vector search.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -16,6 +17,9 @@ from medi_comply.knowledge.ncci_engine import MUECheckResult, NCCICheckResult, N
 from medi_comply.knowledge.medical_necessity import MedicalNecessityEngine, MedNecessityResult
 from medi_comply.knowledge.coding_guidelines import CodingGuideline, CodingGuidelinesStore
 from medi_comply.knowledge.vector_store import CodeSearchResult, GuidelineSearchResult, MedicalVectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +103,16 @@ class KnowledgeManager:
         from medi_comply.knowledge.seed_data import seed_all_data
 
         seed_all_data(self)
-        self.vector_store.initialize()
-        self._build_vector_index()
+        try:
+            self.vector_store.initialize()
+        except Exception as exc:  # pragma: no cover - defensive safeguard
+            logger.warning("Vector store initialization raised an exception: %s", exc)
+
+        if self.vector_store.is_initialized:
+            self._build_vector_index()
+        else:
+            logger.warning("Vector store unavailable — continuing with keyword-only search")
+
         self._initialized = True
         self._last_updated = datetime.now(timezone.utc)
 
@@ -358,11 +370,65 @@ class KnowledgeManager:
         -------
         list[CodeSearchResult]
         """
-        if code_type == "icd10":
-            return self.vector_store.search_icd10(clinical_text, top_k)
-        elif code_type == "cpt":
-            return self.vector_store.search_cpt(clinical_text, top_k)
-        return []
+        normalized_type = code_type.lower()
+
+        if normalized_type == "icd10":
+            search_func = self.vector_store.search_icd10
+        elif normalized_type == "cpt":
+            search_func = self.vector_store.search_cpt
+        else:
+            return []
+
+        vector_results: list[CodeSearchResult] = []
+        if self.vector_store.is_initialized:
+            try:
+                vector_results = search_func(clinical_text, top_k)
+            except Exception as exc:  # pragma: no cover - safety net
+                logger.error("Vector search failed for %s codes: %s", normalized_type, exc)
+                vector_results = []
+
+        if vector_results:
+            return vector_results
+
+        return self._keyword_search_fallback(clinical_text, normalized_type, top_k)
+
+    def _keyword_search_fallback(
+        self,
+        clinical_text: str,
+        code_type: str,
+        top_k: int,
+    ) -> list[CodeSearchResult]:
+        query_terms = {
+            term.lower()
+            for term in clinical_text.split()
+            if len(term) > 2
+        }
+        if not query_terms:
+            return []
+
+        registry = self.icd10_db._codes if code_type == "icd10" else self.cpt_db._codes
+        scored: list[tuple[float, str, Any]] = []
+        for code, entry in registry.items():
+            desc_terms = set(entry.description.lower().split())
+            overlap = len(query_terms & desc_terms)
+            if not overlap:
+                continue
+            score = overlap / len(query_terms)
+            scored.append((score, code, entry))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top = scored[:top_k]
+        results: list[CodeSearchResult] = []
+        for score, code, entry in top:
+            results.append(
+                CodeSearchResult(
+                    code=code,
+                    description=entry.description,
+                    similarity_score=score,
+                    metadata={"fallback": "keyword"},
+                )
+            )
+        return results
 
     # -- Version -----------------------------------------------------------
 

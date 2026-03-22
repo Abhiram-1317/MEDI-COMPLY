@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from medi_comply.schemas.coding_result import CodingResult
 from medi_comply.guardrails.security_guards import SecurityGuards
+from medi_comply.core.utils import safe_get_code, safe_get_confidence, safe_get_evidence, safe_get_text
 
 
 class OutputCheckResult(BaseModel):
@@ -147,15 +148,18 @@ class OutputValidator:
         all_codes = coding_result.diagnosis_codes + coding_result.procedure_codes
         
         for code in all_codes:
-             if len(code.reasoning_chain) < 2:
-                  missing_critical.append(f"Code {code.code} has < 2 reasoning steps.")
-             if not code.clinical_evidence:
-                  missing_critical.append(f"Code {code.code} is missing clinical evidence.")
-             if not code.description:
-                  missing_critical.append(f"Code {code.code} is missing description.")
+             code_value = safe_get_code(code) or "UNKNOWN"
+             reasoning_chain = getattr(code, "reasoning_chain", []) or []
+             if len(reasoning_chain) < 2:
+                  missing_critical.append(f"Code {code_value} has < 2 reasoning steps.")
+             evidence = safe_get_evidence(code)
+             if not evidence:
+                  missing_critical.append(f"Code {code_value} is missing clinical evidence.")
+             if not (safe_get_text(code) or getattr(code, "description", "")):
+                  missing_critical.append(f"Code {code_value} is missing description.")
                   
-             if not code.guidelines_cited:
-                  soft_issues.append(f"Code {code.code} cited no guidelines.")
+             if not getattr(code, "guidelines_cited", []):
+                  soft_issues.append(f"Code {code_value} cited no guidelines.")
                   
         if not coding_result.coding_summary:
              missing_critical.append("Missing overall coding summary.")

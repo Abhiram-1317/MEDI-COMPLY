@@ -22,6 +22,7 @@ from medi_comply.audit.audit_models import (
     RetryRecord, LLMInteractionRecord,
 )
 from medi_comply.audit.risk_scorer import AuditRiskScorer
+from medi_comply.core.utils import safe_get_code, safe_get_confidence, safe_get_text
 
 
 # ────────────────────────────────────────────────────────
@@ -135,8 +136,10 @@ ASSIGNED CODES ({out.total_codes} total)
         idx = 1
         for cod_cat in (out.final_diagnosis_codes, out.final_procedure_codes):
             for c in cod_cat:
-                desc = c.get("description", "")[:40]
-                summary += f"\n{idx}. [{c['position']}] {c['code']} — {desc}...\n"
+                desc = (safe_get_text(c) or "")[:40]
+                code_value = safe_get_code(c) or c.get("code", "")
+                position = c.get("position", "UNKNOWN")
+                summary += f"\n{idx}. [{position}] {code_value} — {desc}...\n"
                 idx += 1
 
         # --- Compliance layer breakdown ---
@@ -333,12 +336,14 @@ Chain:       VALID ✅
 
         # Footer
         card_lines.append("└" + "─" * _BOX_WIDTH + "┘")
-        return "\n".join(card_lines)
+        code_value = safe_get_code(c) or c.code
+        description = safe_get_text(c) or c.description
+        conf_value = safe_get_confidence(c, getattr(c, "confidence_score", 0.0))
 
-    # ── Retry history formatting ──────────────────────────
+        desc_trunc = description[: _BOX_WIDTH - 4]
 
     def format_retry_history(self, retries: list[RetryRecord]) -> str:
-        """Render the retry history as a numbered list with feedback
+        conf_str = f"{conf_value * 100:.0f}%"
         and code-change deltas for each attempt."""
         if not retries:
             return "No retries were required.\n"

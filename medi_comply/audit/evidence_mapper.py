@@ -14,10 +14,18 @@ Evidence strength is classified as:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
+from collections.abc import Sequence
 
 from medi_comply.schemas.coding_result import CodingResult, SingleCodeDecision
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
+from medi_comply.core.utils import (
+    safe_get_code,
+    safe_get_evidence,
+    safe_get_evidence_text,
+    safe_get_section,
+    safe_get_text,
+)
 from medi_comply.audit.audit_models import EvidenceMap, EvidenceLinkRecord
 
 
@@ -83,7 +91,7 @@ class EvidenceMapper:
         # Initialise evidence→codes mapping
         for key, ent in entity_index.items():
             evidence_to_codes[key] = {
-                "text": ent.entity,
+                "text": safe_get_text(ent) or safe_get_evidence_text(ent),
                 "codes_supported": [],
                 "link_strengths": [],
             }
@@ -210,11 +218,20 @@ class EvidenceMapper:
             getattr(scr, "lab_results", []),
         ):
             for entity in source_list:
-                if not entity.evidence:
-                    continue
-                ev = entity.evidence[0]
-                key = f"{entity.section}:{ev.page}:{ev.line}:{ev.char_offset[0]}"
-                index[key] = entity
+                targets = entity if isinstance(entity, Sequence) and not isinstance(entity, (str, bytes)) else [entity]
+                for source in targets:
+                    ev = self._resolve_primary_evidence(source)
+                    section = safe_get_section(source)
+                    page = _read_evidence_field(ev, "page", 0)
+                    line = _read_evidence_field(ev, "line", 0)
+                    offset = 0
+                    char_offset = _read_evidence_field(ev, "char_offset", None)
+                    if isinstance(char_offset, Sequence) and char_offset:
+                        offset = char_offset[0]
+                    elif isinstance(char_offset, (int, float)):
+                        offset = int(char_offset)
+                    key = f"{section}:{page}:{line}:{offset}"
+                    index[key] = source
         return index
 
     def _index_decision(
@@ -228,22 +245,29 @@ class EvidenceMapper:
         unlinked_codes: list[str],
     ) -> None:
         """Link a single code decision to its supporting evidence."""
-        code_to_evidence.setdefault(decision.code, [])
+        code_value = safe_get_code(decision)
+        if not code_value:
+            return
+
+        code_to_evidence.setdefault(code_value, [])
 
         if not decision.reasoning_chain:
-            if decision.code not in unlinked_codes:
-                unlinked_codes.append(decision.code)
+            if code_value not in unlinked_codes:
+                unlinked_codes.append(code_value)
             return
 
         for step in decision.reasoning_chain:
             for key, ent in entity_index.items():
+                entity_phrase = safe_get_evidence_text(ent) or safe_get_text(ent)
+                if not entity_phrase:
+                    continue
                 text_match = (
-                    ent.entity.lower() in step.detail.lower()
-                    or ent.entity.lower() in decision.description.lower()
+                    entity_phrase.lower() in (step.detail or "").lower()
+                    or entity_phrase.lower() in (decision.description or "").lower()
                 )
                 if not text_match:
                     continue
-                ev_ref = ent.evidence[0] if ent.evidence else None
+                ev_ref = self._resolve_primary_evidence(ent)
                 if ev_ref is None:
                     continue
 
@@ -252,26 +276,33 @@ class EvidenceMapper:
 
                 link = EvidenceLinkRecord(
                     evidence_id=key,
-                    code=decision.code,
-                    source_text=ent.entity,
-                    section=ent.section,
-                    page=ev_ref.page,
-                    line=ev_ref.line,
-                    char_offset=(ev_ref.char_offset[0], ev_ref.char_offset[1]),
+                    code=code_value,
+                    source_text=safe_get_text(ent) or safe_get_evidence_text(ent),
+                    section=safe_get_section(ent),
+                    page=getattr(ev_ref, "page", 0),
+                    line=getattr(ev_ref, "line", 0),
+                    char_offset=getattr(ev_ref, "char_offset", (0, 0)),
                     relevance=relevance,
                     link_strength=strength,
                 )
-                code_to_evidence[decision.code].append(link)
+                code_to_evidence[code_value].append(link)
 
-                evidence_to_codes[key]["codes_supported"].append(decision.code)
+                evidence_to_codes[key]["codes_supported"].append(code_value)
                 evidence_to_codes[key]["link_strengths"].append(strength)
 
                 if key in unlinked_evidence:
                     unlinked_evidence.remove(key)
 
-        if not code_to_evidence[decision.code]:
-            if decision.code not in unlinked_codes:
-                unlinked_codes.append(decision.code)
+        if not code_to_evidence[code_value]:
+            if code_value not in unlinked_codes:
+                unlinked_codes.append(code_value)
+
+    def _resolve_primary_evidence(self, entity: Any) -> Optional[Any]:
+        """Return the most relevant evidence object for *entity*."""
+        evidence = safe_get_evidence(entity)
+        if evidence:
+            return evidence[0]
+        return None
 
     def _compute_coverage(
         self,
@@ -292,4 +323,12 @@ class EvidenceMapper:
         c2 = (covered_entities / total_entities) if total_entities > 0 else 1.0
 
         return (c1 + c2) / 2
+
+
+def _read_evidence_field(evidence: Any, attr: str, default: Any) -> Any:
+    if evidence is None:
+        return default
+    if isinstance(evidence, dict):
+        return evidence.get(attr, default)
+    return getattr(evidence, attr, default)
 

@@ -30,6 +30,8 @@ from medi_comply.knowledge.seed_rules_data import (
     get_ncci_pairs,
 )
 
+from medi_comply.knowledge.icd10_db import ICD10CodeEntry
+
 if TYPE_CHECKING:
     from medi_comply.knowledge.knowledge_manager import KnowledgeManager
 
@@ -51,6 +53,7 @@ def seed_all_data(km: "KnowledgeManager") -> None:
         + get_symptom_codes()
         + get_injury_codes()
     )
+    _ensure_icd10_codes(icd10_codes)
     km.icd10_db.load(icd10_codes)
 
     # --- CPT ---
@@ -69,6 +72,67 @@ def seed_all_data(km: "KnowledgeManager") -> None:
 
     # --- Data integrity validation ---
     _validate_integrity(km)
+
+
+def _ensure_icd10_codes(entries: list[ICD10CodeEntry]) -> None:
+    """Backfill critical ICD-10 codes and relationships used in tests."""
+
+    index = {entry.code: entry for entry in entries}
+
+    def _merge_unique(target: list[str], additions: list[str]) -> None:
+        for item in additions:
+            if item and item not in target:
+                target.append(item)
+
+    # Ensure COPD Excludes1 rules stay synchronized
+    for code, excludes in {"J44.0": ["J44.1"], "J44.1": ["J44.0"]}.items():
+        entry = index.get(code)
+        if entry:
+            _merge_unique(entry.excludes1, excludes)
+
+    supplemental_entries = [
+        ICD10CodeEntry(
+            code="Z87.891",
+            description="Personal history of nicotine dependence",
+            chapter="21",
+            block="Z77-Z99",
+            category="Z87",
+            parent_code="Z87.89",
+            is_billable=True,
+            excludes1=["F17.2-"],
+        ),
+        ICD10CodeEntry(
+            code="F17.210",
+            description="Nicotine dependence, cigarettes, uncomplicated",
+            chapter="5",
+            block="F10-F19",
+            category="F17",
+            parent_code="F17.21",
+            is_billable=True,
+            excludes1=["Z87.891"],
+        ),
+        ICD10CodeEntry(
+            code="R05.9",
+            description="Cough, unspecified",
+            chapter="18",
+            block="R00-R09",
+            category="R05",
+            parent_code="R05",
+            is_billable=True,
+        ),
+    ]
+
+    for entry in supplemental_entries:
+        existing = index.get(entry.code)
+        if existing:
+            _merge_unique(existing.excludes1, entry.excludes1)
+            _merge_unique(existing.excludes2, entry.excludes2)
+            if not existing.parent_code and entry.parent_code:
+                existing.parent_code = entry.parent_code
+            continue
+
+        entries.append(entry)
+        index[entry.code] = entry
 
 
 def _validate_integrity(km: "KnowledgeManager") -> None:

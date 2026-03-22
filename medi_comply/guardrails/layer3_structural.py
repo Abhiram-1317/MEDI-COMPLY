@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from medi_comply.schemas.coding_result import CodingResult
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
+from medi_comply.core.utils import safe_get_code, safe_get_confidence
 
 
 class StructuralCheckResult(BaseModel):
@@ -70,12 +71,18 @@ class StructuralGuardrails:
         invalid_codes = []
         
         for code in coding_result.diagnosis_codes:
-             if not self.km.validate_code_exists(code.code, "icd10"):
-                  invalid_codes.append(code.code)
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               if not self.km.validate_code_exists(code_value, "icd10"):
+                   invalid_codes.append(code_value)
                   
         for code in coding_result.procedure_codes:
-             if not self.km.validate_code_exists(code.code, "cpt"):
-                  invalid_codes.append(code.code)
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               if not self.km.validate_code_exists(code_value, "cpt"):
+                   invalid_codes.append(code_value)
                   
         if invalid_codes:
              return self._make_result(
@@ -89,7 +96,11 @@ class StructuralGuardrails:
     def check_02_ncci_edits(self, coding_result: CodingResult) -> StructuralCheckResult:
         """CHECK 2: NCCI EDIT ENFORCEMENT"""
         start = time.time()
-        cpt_codes = [c.code for c in coding_result.procedure_codes]
+           cpt_codes = []
+           for proc in coding_result.procedure_codes:
+               code_value = safe_get_code(proc)
+               if code_value:
+                   cpt_codes.append(code_value)
         
         for i in range(len(cpt_codes)):
              for j in range(i + 1, len(cpt_codes)):
@@ -123,7 +134,7 @@ class StructuralGuardrails:
     def check_03_excludes1(self, coding_result: CodingResult) -> list[StructuralCheckResult]:
         """CHECK 3: EXCLUDES1 VALIDATION"""
         start = time.time()
-        icd_codes = [c.code for c in coding_result.diagnosis_codes]
+        icd_codes = [code for c in coding_result.diagnosis_codes if (code := safe_get_code(c))]
         results = []
         
         for i in range(len(icd_codes)):
@@ -142,7 +153,7 @@ class StructuralGuardrails:
     def check_04_excludes2(self, coding_result: CodingResult) -> list[StructuralCheckResult]:
         """CHECK 4: EXCLUDES2 VALIDATION"""
         start = time.time()
-        icd_codes = [c.code for c in coding_result.diagnosis_codes]
+        icd_codes = [code for c in coding_result.diagnosis_codes if (code := safe_get_code(c))]
         results = []
         
         for i in range(len(icd_codes)):
@@ -163,12 +174,15 @@ class StructuralGuardrails:
         start = time.time()
         results = []
         for code in coding_result.diagnosis_codes:
-             if hasattr(self.km.icd10_db, "has_higher_specificity"):
-                  if self.km.icd10_db.has_higher_specificity(code.code):
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               if hasattr(self.km.icd10_db, "has_higher_specificity"):
+                   if self.km.icd10_db.has_higher_specificity(code_value):
                        results.append(self._make_result(
                            "CHECK_05_SPECIFICITY", "Specificity Adequacy", False, "SOFT_FAIL",
-                           f"Code {code.code} is not at maximum specificity.", [code.code],
-                           f"Check if documentation supports a more specific code than {code.code}.",
+                          f"Code {code_value} is not at maximum specificity.", [code_value],
+                          f"Check if documentation supports a more specific code than {code_value}.",
                            "ICD-10-CM OCG I.A.4", start
                        ))
         return results if results else [self._make_result("CHECK_05_SPECIFICITY", "Specificity Adequacy", True, "NONE", "All codes sufficiently specific.", start=start)]
@@ -178,22 +192,26 @@ class StructuralGuardrails:
         start = time.time()
         results = []
         for code in coding_result.diagnosis_codes:
-             entry = self.km.icd10_db.get_code(code.code)
-             if not entry: continue
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               entry = self.km.icd10_db.get_code(code_value)
+               if not entry:
+                   continue
              
              patient_gender = coding_result.patient_gender.upper()
              is_m = patient_gender.startswith('M')
              is_f = patient_gender.startswith('F')
              if entry.valid_for_gender != "B":
-                  if entry.valid_for_gender == "M" and not is_m:
-                       results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code.code} valid for M only", [code.code], f"Code {code.code} is not valid for {patient_gender} patients.", start=start))
-                  elif entry.valid_for_gender == "F" and not is_f:
-                       results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code.code} valid for F only", [code.code], f"Code {code.code} is not valid for {patient_gender} patients.", start=start))
+                   if entry.valid_for_gender == "M" and not is_m:
+                       results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code_value} valid for M only", [code_value], f"Code {code_value} is not valid for {patient_gender} patients.", start=start))
+                   elif entry.valid_for_gender == "F" and not is_f:
+                       results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code_value} valid for F only", [code_value], f"Code {code_value} is not valid for {patient_gender} patients.", start=start))
                        
              age = coding_result.patient_age
              min_age, max_age = entry.valid_age_range
              if not (min_age <= age <= max_age):
-                  results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code.code} valid for ages {min_age}-{max_age}", [code.code], f"Code {code.code} is not valid for age {age}.", start=start))
+                   results.append(self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", False, "HARD_FAIL", f"Code {code_value} valid for ages {min_age}-{max_age}", [code_value], f"Code {code_value} is not valid for age {age}.", start=start))
         
         return results if results else [self._make_result("CHECK_06_AGE_SEX", "Age/Sex Conflict", True, "NONE", "No age/sex conflicts.", start=start)]
     
@@ -202,10 +220,13 @@ class StructuralGuardrails:
         start = time.time()
         results = []
         for code in coding_result.diagnosis_codes:
-             entry = self.km.icd10_db.get_code(code.code)
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               entry = self.km.icd10_db.get_code(code_value)
              if entry and entry.is_manifestation:
                   if code.sequence_position == "PRIMARY":
-                       results.append(self._make_result("CHECK_07_MANIFESTATION", "Manifestation Pairing", False, "HARD_FAIL", f"Manifestation {code.code} is primary", [code.code], f"Code {code.code} is a manifestation code and cannot be primary. It must follow an etiology code.", start=start))
+                       results.append(self._make_result("CHECK_07_MANIFESTATION", "Manifestation Pairing", False, "HARD_FAIL", f"Manifestation {code_value} is primary", [code_value], f"Code {code_value} is a manifestation code and cannot be primary. It must follow an etiology code.", start=start))
                   else:
                        # simplified check: make sure its not alone or check code_first
                        pass
@@ -225,7 +246,10 @@ class StructuralGuardrails:
         results = []
         counts = {}
         for code in coding_result.procedure_codes:
-            counts[code.code] = counts.get(code.code, 0) + 1
+            code_value = safe_get_code(code)
+            if not code_value:
+                continue
+            counts[code_value] = counts.get(code_value, 0) + 1
             
         for code, count in counts.items():
             if hasattr(self.km.cpt_db, "get_code"):
@@ -240,23 +264,29 @@ class StructuralGuardrails:
         start = time.time()
         results = []
         for code in coding_result.diagnosis_codes:
-             entry = self.km.icd10_db.get_code(code.code)
-             if entry and not entry.is_billable:
-                  results.append(self._make_result("CHECK_11_BILLABLE", "Billable Status", False, "HARD_FAIL", f"Non-billable code {code.code}", [code.code], f"Code {code.code} is a category code and is not billable. Use a more specific code.", start=start))
+               code_value = safe_get_code(code)
+               if not code_value:
+                   continue
+               entry = self.km.icd10_db.get_code(code_value)
+               if entry and not entry.is_billable:
+                   results.append(self._make_result("CHECK_11_BILLABLE", "Billable Status", False, "HARD_FAIL", f"Non-billable code {code_value}", [code_value], f"Code {code_value} is a category code and is not billable. Use a more specific code.", start=start))
         return results if results else [self._make_result("CHECK_11_BILLABLE", "Billable Status", True, "NONE", "All codes billable.", start=start)]
         
     def check_12_use_additional_compliance(self, coding_result: CodingResult) -> list[StructuralCheckResult]:
         """CHECK 12: USE ADDITIONAL COMPLIANCE"""
         start = time.time()
         results = []
-        assigned = [c.code for c in coding_result.diagnosis_codes]
+        assigned = [code for c in coding_result.diagnosis_codes if (code := safe_get_code(c))]
         
         for code in coding_result.diagnosis_codes:
-            entry = self.km.icd10_db.get_code(code.code)
+            code_value = safe_get_code(code)
+            if not code_value:
+                continue
+            entry = self.km.icd10_db.get_code(code_value)
             if entry and hasattr(entry, "use_additional") and entry.use_additional:
                 for req in entry.use_additional:
                     if not any(a.startswith(req) for a in assigned):
-                         results.append(self._make_result("CHECK_12_USE_ADDITIONAL", "Use Additional Compliance", False, "SOFT_FAIL", f"Code {code.code} requires additional code {req}", [code.code], f"Add a code from category {req}.", start=start))
+                         results.append(self._make_result("CHECK_12_USE_ADDITIONAL", "Use Additional Compliance", False, "SOFT_FAIL", f"Code {code_value} requires additional code {req}", [code_value], f"Add a code from category {req}.", start=start))
                          
         return results if results else [self._make_result("CHECK_12_USE_ADDITIONAL", "Use Additional Code Compliance", True, "NONE", "Use Additional rules satisfied.", start=start)]
         
@@ -266,9 +296,10 @@ class StructuralGuardrails:
         lowest = 1.0
         affected = []
         for code in coding_result.diagnosis_codes + coding_result.procedure_codes:
-             if code.confidence_score < lowest:
-                 lowest = code.confidence_score
-                 affected = [code.code]
+             confidence = safe_get_confidence(code, getattr(code, "confidence_score", 1.0))
+             if confidence < lowest:
+                 lowest = confidence
+                 affected = [safe_get_code(code) or "UNKNOWN"]
                  
         if lowest < 0.70:
             return self._make_result("CHECK_13_CONFIDENCE", "Confidence Threshold", False, "ESCALATE", f"Very low confidence: {lowest}", affected, "Check supporting evidence or escalate for review.", start=start)

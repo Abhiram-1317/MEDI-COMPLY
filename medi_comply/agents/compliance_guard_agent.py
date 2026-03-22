@@ -6,7 +6,7 @@ Wrapper for orchestrating guardrails autonomously.
 from typing import Any
 
 from medi_comply.core.agent_base import BaseAgent
-from medi_comply.core.message_models import AgentMessage, AgentResponse
+from medi_comply.core.message_models import AgentMessage, AgentResponse, ResponseStatus
 from medi_comply.schemas.common import AgentState, AgentType
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
 from medi_comply.guardrails.guardrail_chain import GuardrailChain
@@ -38,7 +38,14 @@ class ComplianceGuardAgent(BaseAgent):
         
         if "coding_result" not in message.payload:
              self.transition_state(AgentState.ERROR)
-             return AgentResponse(agent_id=self.agent_id, success=False, error="Missing coding_result payload")
+             return AgentResponse(
+                 original_message_id=message.message_id,
+                 from_agent=self.agent_name,
+                 status=ResponseStatus.FAILURE,
+                 payload={},
+                 errors=["Missing coding_result payload"],
+                 trace_id=message.trace_id,
+             )
              
         coding_result = message.payload["coding_result"]
         scr = message.payload.get("scr")
@@ -50,31 +57,35 @@ class ComplianceGuardAgent(BaseAgent):
         self.transition_state(AgentState.VALIDATING)
         
         report = await self.guardrail_chain.validate(
-             coding_result=coding_result,
-             scr=scr,
-             retrieval_context=retrieval_context,
-             raw_llm_outputs=raw_outputs,
-             skip_semantic=self.llm_client is None,
-             retry_count=attempt,
-             max_retries=max_retries
+            coding_result=coding_result,
+            scr=scr,
+            retrieval_context=retrieval_context,
+            raw_llm_outputs=raw_outputs,
+            skip_semantic=self.llm_client is None,
+            retry_count=attempt,
+            max_retries=max_retries,
         )
-        
+
         decision = report.overall_decision
         if decision == "PASS":
-             self.transition_state(AgentState.APPROVED)
-             self.transition_state(AgentState.COMPLETED)
+            self.transition_state(AgentState.APPROVED)
+            self.transition_state(AgentState.COMPLETED)
         elif decision == "RETRY":
-             self.transition_state(AgentState.RETRY)
+            self.transition_state(AgentState.RETRY)
         elif decision == "BLOCK":
-             self.transition_state(AgentState.ERROR)
-        else: # ESCALATE
-             self.transition_state(AgentState.ESCALATED)
-             
+            self.transition_state(AgentState.ERROR)
+        else:  # ESCALATE
+            self.transition_state(AgentState.ESCALATED)
+
+        response_status = ResponseStatus.SUCCESS if decision == "PASS" else ResponseStatus.PARTIAL
+        error_msg = None if decision == "PASS" else f"Guardrail Check Failed: {decision}"
         return AgentResponse(
-             agent_id=self.agent_id,
-             success=(decision == "PASS"),
-             data={"compliance_report": report},
-             error=None if decision == "PASS" else f"Guardrail Check Failed: {decision}"
+            original_message_id=message.message_id,
+            from_agent=self.agent_name,
+            status=response_status,
+            payload={"compliance_report": report},
+            errors=[error_msg] if error_msg else [],
+            trace_id=message.trace_id,
         )
     
     def should_retry(self, report: ComplianceReport, current_attempt: int) -> bool:

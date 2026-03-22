@@ -17,6 +17,7 @@ from medi_comply.schemas.retrieval import (
 )
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
+from medi_comply.core.utils import safe_get_code
 
 
 class ContextAssembler:
@@ -38,7 +39,10 @@ class ContextAssembler:
         # 2. Extract all condition codes for medical necessity checks
         all_dx_codes = []
         for cc in condition_candidates:
-            all_dx_codes.extend([c.code for c in cc.candidates])
+            for cand in cc.candidates:
+                code_value = safe_get_code(cand)
+                if code_value:
+                    all_dx_codes.append(code_value)
             
         # 3. Enrich individual procedure candidates
         for pc in procedure_candidates:
@@ -84,20 +88,23 @@ class ContextAssembler:
         valid_cands = []
         
         for cand in candidates_group.candidates:
-            if not km.icd10_db.code_exists(cand.code):
+            code_value = safe_get_code(cand)
+            if not code_value:
+                continue
+            if not km.icd10_db.code_exists(code_value):
                 continue
                 
-            code_data = km.icd10_db._codes[cand.code]
+            code_data = km.icd10_db._codes[code_value]
             
             # Age/Gender validation
             patient_age = patient_context.get("age", 0)
             patient_gender = patient_context.get("gender", "unspecified").lower()
             
             # If male and code is O-chapter (Pregnancy), invalid
-            if patient_gender == "male" and cand.code.startswith("O"):
+            if patient_gender == "male" and code_value.startswith("O"):
                 cand.valid_for_gender = False
             # Prevent male codes on female patients, etc. (Simplistic for hackathon)
-            if patient_gender == "female" and cand.code.startswith("N4"):
+            if patient_gender == "female" and code_value.startswith("N4"):
                 cand.valid_for_gender = False
                 
             # Pull instructions
@@ -133,17 +140,20 @@ class ContextAssembler:
         valid_cands = []
         
         for cand in candidates_group.candidates:
-            if not km.cpt_db.code_exists(cand.code):
+            code_value = safe_get_code(cand)
+            if not code_value:
+                continue
+            if not km.cpt_db.code_exists(code_value):
                 continue
                 
             # Check medical necessity
             if km.med_necessity:
                 med_nec = km.med_necessity.check_medical_necessity(
-                    cand.code, all_condition_codes
+                    code_value, all_condition_codes
                 )
                 if med_nec:
                     candidates_group.medical_necessity.append(MedNecessityInfo(
-                        procedure_code=cand.code,
+                        procedure_code=code_value,
                         is_covered=med_nec.is_medically_necessary,
                         lcd_id=med_nec.lcd_ref,
                         lcd_title="",
@@ -170,7 +180,9 @@ class ContextAssembler:
         tracked_codes = []
         for i, group in enumerate(all_condition_candidates):
             for cand in group.candidates:
-                tracked_codes.append((i, cand.code))
+                code_value = safe_get_code(cand)
+                if code_value:
+                    tracked_codes.append((i, code_value))
                 
         # Compare all pairs (only between DIFFERENT condition groups)
         for i in range(len(tracked_codes)):
@@ -214,7 +226,9 @@ class ContextAssembler:
         tracked_codes = []
         for i, group in enumerate(all_procedure_candidates):
             for cand in group.candidates:
-                tracked_codes.append((i, cand.code))
+                code_value = safe_get_code(cand)
+                if code_value:
+                    tracked_codes.append((i, code_value))
                 
         for i in range(len(tracked_codes)):
             for j in range(i + 1, len(tracked_codes)):

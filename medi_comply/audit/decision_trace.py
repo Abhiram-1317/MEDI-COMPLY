@@ -4,7 +4,7 @@ MEDI-COMPLY — Decision Trace Builder.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from medi_comply.audit.audit_models import (
     WorkflowTrace, InputReference, NLPStageRecord, RetrievalStageRecord,
@@ -18,6 +18,21 @@ from medi_comply.schemas.coding_result import CodingResult, SingleCodeDecision
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
 from medi_comply.agents.knowledge_retrieval_agent import CodeRetrievalContext
 from medi_comply.guardrails.guardrail_chain import ComplianceReport
+from medi_comply.core.utils import (
+    safe_get_confidence,
+    safe_get_evidence,
+    safe_get_section,
+    safe_get_text,
+)
+
+
+def _get_evidence_attr(evidence: list[Any], attr: str, default: int | float = 0) -> int | float:
+    if not evidence:
+        return default
+    first = evidence[0]
+    if isinstance(first, dict):
+        return first.get(attr, default)
+    return getattr(first, attr, default)
 
 
 class DecisionTraceBuilder:
@@ -48,30 +63,53 @@ class DecisionTraceBuilder:
         started_at: datetime, completed_at: datetime
     ) -> None:
         
-        ents_c = [
-            ExtractedEntitySummary(
-                entity_id=c.entity_id, entity_text=c.text, entity_type="CONDITION",
-                assertion=c.assertion,
-                section_found_in=c.evidence[0].section if c.evidence else "", confidence=c.confidence,
-                evidence_page=c.evidence[0].page if c.evidence else 0, evidence_line=c.evidence[0].line if c.evidence else 0
-            ) for c in scr.conditions
-        ]
-        
-        ents_m = [
-            ExtractedEntitySummary(
-                entity_id=m.entity_id, entity_text=m.drug_name, entity_type="MEDICATION",
-                assertion=m.status, section_found_in=m.evidence.section if m.evidence else "", confidence=m.confidence,
-                evidence_page=m.evidence.page if m.evidence else 0, evidence_line=m.evidence.line if m.evidence else 0
-            ) for m in scr.medications
-        ]
-        
-        ents_p = [
-            ExtractedEntitySummary(
-                entity_id=p.entity_id, entity_text=p.text, entity_type="PROCEDURE",
-                assertion=p.status, section_found_in=p.evidence[0].section if p.evidence else "", confidence=p.confidence,
-                evidence_page=p.evidence[0].page if p.evidence else 0, evidence_line=p.evidence[0].line if p.evidence else 0
-            ) for p in scr.procedures
-        ]
+        ents_c: list[ExtractedEntitySummary] = []
+        for c in scr.conditions:
+            evidence = safe_get_evidence(c)
+            ents_c.append(
+                ExtractedEntitySummary(
+                    entity_id=c.entity_id,
+                    entity_text=safe_get_text(c),
+                    entity_type="CONDITION",
+                    assertion=c.assertion,
+                    section_found_in=safe_get_section(c),
+                    confidence=safe_get_confidence(c, getattr(c, "confidence", 0.0)),
+                    evidence_page=_get_evidence_attr(evidence, "page", 0),
+                    evidence_line=_get_evidence_attr(evidence, "line", 0),
+                )
+            )
+
+        ents_m: list[ExtractedEntitySummary] = []
+        for m in scr.medications:
+            evidence = safe_get_evidence(m)
+            ents_m.append(
+                ExtractedEntitySummary(
+                    entity_id=m.entity_id,
+                    entity_text=safe_get_text(m),
+                    entity_type="MEDICATION",
+                    assertion=m.status,
+                    section_found_in=safe_get_section(m),
+                    confidence=safe_get_confidence(m, getattr(m, "confidence", 0.0)),
+                    evidence_page=_get_evidence_attr(evidence, "page", 0),
+                    evidence_line=_get_evidence_attr(evidence, "line", 0),
+                )
+            )
+
+        ents_p: list[ExtractedEntitySummary] = []
+        for p in scr.procedures:
+            evidence = safe_get_evidence(p)
+            ents_p.append(
+                ExtractedEntitySummary(
+                    entity_id=p.entity_id,
+                    entity_text=safe_get_text(p),
+                    entity_type="PROCEDURE",
+                    assertion=p.status,
+                    section_found_in=safe_get_section(p),
+                    confidence=safe_get_confidence(p, getattr(p, "confidence", 0.0)),
+                    evidence_page=_get_evidence_attr(evidence, "page", 0),
+                    evidence_line=_get_evidence_attr(evidence, "line", 0),
+                )
+            )
         
         self._stage_records["nlp"] = NLPStageRecord(
             stage_id=f"STG-NLP-{uuid.uuid4().hex[:6]}", agent_name="ClinicalNLPAgent",

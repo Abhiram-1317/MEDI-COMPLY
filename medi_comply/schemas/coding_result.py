@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -123,7 +123,7 @@ class CodingResult(BaseModel):
     
     # Retry mechanism state
     attempt_number: int = 1
-    previous_feedback: Optional[list[str]] = None
+    previous_feedback: Optional[list[Any]] = None
     
     # Rollups
     coding_summary: str

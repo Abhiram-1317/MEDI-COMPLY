@@ -11,11 +11,15 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Optional
+import logging
 
 from medi_comply.schemas.retrieval import RankedCodeCandidate
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
 from medi_comply.knowledge.vector_store import MedicalVectorStore
 from medi_comply.agents.clinical_code_mapper import ClinicalCodeMapper
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +64,10 @@ class VectorRetrievalStrategy(RetrievalStrategy):
     async def retrieve(
         self, query: str, code_type: str, top_k: int = 15
     ) -> list[RankedCodeCandidate]:
+        if not getattr(self.vector_store, "is_initialized", False):
+            logger.info("Vector store unavailable — skipping vector retrieval")
+            return []
+
         if code_type.upper() == "ICD10":
             search_func = self.vector_store.search_icd10
         else:
@@ -67,28 +75,34 @@ class VectorRetrievalStrategy(RetrievalStrategy):
             
         # Async wrap since vector search is sync in our current Knowledge manager
         loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None,
-            search_func,
-            query,
-            top_k
-        )
+        try:
+            results = await loop.run_in_executor(
+                None,
+                search_func,
+                query,
+                top_k
+            )
+        except Exception as exc:
+            logger.error("Vector retrieval failed: %s", exc)
+            return []
         
         candidates = []
-        for i, res in enumerate(results):
-            # Distance 0 is perfect, 1.0 is bad, convert distance to score
-            v_score = max(0.0, 1.0 - res.distance)
-            
+        if not results:
+            return candidates
+
+        for res in results:
+            v_score = max(0.0, res.similarity_score)
+            metadata = res.metadata or {}
             cand = RankedCodeCandidate(
-                code=res.entity_id,
-                description=res.metadata.get("description", ""),
-                long_description=res.text,
+                code=res.code,
+                description=metadata.get("description", res.description),
+                long_description=metadata.get("long_description"),
                 code_type=code_type.upper(),
                 relevance_score=v_score,
                 vector_score=v_score,
-                is_billable=res.metadata.get("is_valid_for_submission", True),
-                specificity_level=int(res.metadata.get("depth", 3)),
-                parent_code=res.metadata.get("parent_code"),
+                is_billable=metadata.get("is_valid_for_submission", True),
+                specificity_level=int(metadata.get("depth", 3)),
+                parent_code=metadata.get("parent_code"),
                 retrieval_source="VECTOR"
             )
             candidates.append(cand)

@@ -146,6 +146,17 @@ _CONDITION_KW: list[tuple[str, str]] = [
 # Sort by length descending so longer matches take priority
 _CONDITION_KW.sort(key=lambda x: -len(x[0]))
 
+# Tobacco / smoking history patterns
+_TOBACCO_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"(?:former|ex|previous|prior)\s*(?:smoker|tobacco\s*user?)", re.IGNORECASE), "former tobacco use", "HISTORICAL"),
+    (re.compile(r"(?:current|active)\s*(?:smoker|tobacco\s*user?)", re.IGNORECASE), "current tobacco use", "PRESENT"),
+    (re.compile(r"(?:quit|stopped|ceased)\s+(?:smoking|tobacco)(?:\s*\d+\s*(?:year|yr|month)s?\s*ago)?", re.IGNORECASE), "former tobacco use", "HISTORICAL"),
+    (re.compile(r"(?:never|non)\s*(?:smoker|tobacco)", re.IGNORECASE), "never smoker", "ABSENT"),
+    (re.compile(r"(?:smoking|tobacco)\s*(?:history|hx|h/o)", re.IGNORECASE), "tobacco use history", "HISTORICAL"),
+    (re.compile(r"(\d+)\s*(?:pack[- ]?year)", re.IGNORECASE), "tobacco use history", "HISTORICAL"),
+    (re.compile(r"(?:smok(?:es|ing)|tobacco\s*use)\s+(?:current|daily|regularly)", re.IGNORECASE), "current tobacco use", "PRESENT"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Clinical NER Engine
@@ -194,6 +205,7 @@ class ClinicalNEREngine:
             entities.extend(self._extract_labs(text, section, base_offset, document))
             entities.extend(self._extract_medications(text, section, base_offset, document))
             entities.extend(self._extract_conditions_rules(text, section, base_offset, document))
+            entities.extend(self._extract_tobacco_status(text, section, base_offset, document))
 
         # Deduplicate (same entity_type + overlapping text)
         entities = self._deduplicate(entities)
@@ -512,6 +524,38 @@ class ClinicalNEREngine:
                 used_spans.append((pos, end_pos))
                 start = end_pos
 
+        return entities
+
+    def _extract_tobacco_status(
+        self,
+        text: str,
+        section: ClinicalSection,
+        base_offset: int,
+        document: IngestedDocument,
+    ) -> list[ClinicalEntity]:
+        """Extract smoking / tobacco status indicators."""
+        entities: list[ClinicalEntity] = []
+        for pattern, normalized, assertion in _TOBACCO_PATTERNS:
+            for match in pattern.finditer(text):
+                char_start = base_offset + match.start()
+                char_end = base_offset + match.end()
+                evidence = self._evidence_tracker.create_evidence(
+                    match.group(0), document, section, char_start, char_end,
+                    extraction_method="RULE_BASED",
+                )
+                entities.append(ClinicalEntity(
+                    text=match.group(0),
+                    entity_type="CONDITION",
+                    normalized_text=normalized,
+                    attributes={
+                        "category": "tobacco_use",
+                        "acuity": "chronic",
+                    },
+                    assertion=assertion,
+                    source_evidence=evidence,
+                    confidence=0.90,
+                    raw_context=text[max(0, match.start()-50):match.end()+50],
+                ))
         return entities
 
     # -- Helpers -----------------------------------------------------------

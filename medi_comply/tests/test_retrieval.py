@@ -17,6 +17,7 @@ import time
 from medi_comply.core.config import Settings
 from medi_comply.core.agent_base import AgentMessage
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
+from medi_comply.knowledge.vector_store import MedicalVectorStore
 from medi_comply.agents.clinical_code_mapper import ClinicalCodeMapper
 from medi_comply.agents.retrieval_strategies import (
     VectorRetrievalStrategy, KeywordRetrievalStrategy,
@@ -155,6 +156,38 @@ async def test_vector_search_pulmonary(km):
     strat = VectorRetrievalStrategy(km.vector_store)
     res = await strat.retrieve("worsening breathing difficulty with wheezing", "ICD10", 15)
     assert isinstance(res, list)
+
+
+class _AlwaysEmptyVectorStore(MedicalVectorStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self._initialized = True
+
+    def search_icd10(self, query: str, top_k: int = 10):  # pragma: no cover - delegated elsewhere
+        return []
+
+    def search_cpt(self, query: str, top_k: int = 10):  # pragma: no cover - delegated elsewhere
+        return []
+
+
+def test_vector_store_unavailable_keyword_fallback():
+    km = KnowledgeManager()
+    km.initialize()
+    km.vector_store._initialized = False
+
+    results = km.search_codes("type 2 diabetes", "ICD10", 5)
+    assert len(results) > 0
+    assert all(r.code for r in results)
+
+
+def test_vector_store_empty_results_triggers_fallback():
+    km = KnowledgeManager()
+    km.initialize()
+    km.vector_store = _AlwaysEmptyVectorStore()
+
+    results = km.search_codes("hypertension", "ICD10", 5)
+    assert len(results) > 0
+    assert results[0].metadata.get("fallback") == "keyword"
 
 
 # ---------------------------------------------------------------------------

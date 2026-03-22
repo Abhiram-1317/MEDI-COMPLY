@@ -89,12 +89,29 @@ class MedicalVectorStore:
                 self._client = chromadb.EphemeralClient()
 
             for name in ("icd10_codes", "cpt_codes", "coding_guidelines"):
-                self._collections[name] = self._client.get_or_create_collection(
-                    name=name,
-                    metadata={"hnsw:space": "cosine"},
-                )
+                try:
+                    self._collections[name] = self._client.get_or_create_collection(
+                        name=name,
+                        metadata={"hnsw:space": "cosine"},
+                    )
+                except Exception as coll_exc:
+                    logger.error("Unable to prepare ChromaDB collection %s: %s", name, coll_exc)
+                    self._collections.clear()
+                    self._client = None
+                    self._initialized = False
+                    return
+
+            if not self._run_health_check():
+                logger.warning("ChromaDB health check failed — disabling vector search")
+                self._collections.clear()
+                self._client = None
+                self._initialized = False
+                return
+
             self._initialized = True
-            logger.info("MedicalVectorStore initialized with %d collections", len(self._collections))
+            logger.info(
+                "MedicalVectorStore initialized with %d collections", len(self._collections)
+            )
         except ImportError:
             logger.warning(
                 "chromadb not installed — vector search will use fallback keyword matching"
@@ -151,8 +168,11 @@ class MedicalVectorStore:
             metadatas.append(safe_meta)
 
         if ids:
-            coll.upsert(ids=ids, documents=documents, metadatas=metadatas)
-            logger.info("Upserted %d items into %s", len(ids), collection)
+            try:
+                coll.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                logger.info("Upserted %d items into %s", len(ids), collection)
+            except Exception as exc:
+                logger.error("Failed to upsert %d items into %s: %s", len(ids), collection, exc)
 
     def add_guidelines(self, guidelines: list[dict[str, Any]]) -> None:
         """Add coding guidelines to the guidelines collection.
@@ -190,7 +210,10 @@ class MedicalVectorStore:
             metadatas.append(safe_meta)
 
         if ids:
-            coll.upsert(ids=ids, documents=documents, metadatas=metadatas)
+            try:
+                coll.upsert(ids=ids, documents=documents, metadatas=metadatas)
+            except Exception as exc:
+                logger.error("Failed to upsert guidelines: %s", exc)
 
     # -- Search ------------------------------------------------------------
 
@@ -247,27 +270,19 @@ class MedicalVectorStore:
         if coll is None:
             return []
 
-        try:
-            results = coll.query(query_texts=[query], n_results=top_k)
-        except Exception as exc:
-            logger.error("Guideline search failed: %s", exc)
-            return []
-
+        rows = self._run_query(coll, query, top_k)
         out: list[GuidelineSearchResult] = []
-        if results and results["ids"]:
-            for i, gid in enumerate(results["ids"][0]):
-                meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                dist = results["distances"][0][i] if results["distances"] else 1.0
-                similarity = max(0.0, 1.0 - dist)
-                out.append(
-                    GuidelineSearchResult(
-                        guideline_id=gid,
-                        title=meta.get("title", ""),
-                        rule_text=meta.get("rule_text", ""),
-                        similarity_score=similarity,
-                        metadata=meta,
-                    )
+        for row in rows:
+            meta = row.get("metadata") or {}
+            out.append(
+                GuidelineSearchResult(
+                    guideline_id=row.get("id", ""),
+                    title=meta.get("title", ""),
+                    rule_text=meta.get("rule_text", ""),
+                    similarity_score=self._distance_to_similarity(row.get("distance")),
+                    metadata=meta,
                 )
+            )
         return out
 
     def hybrid_search(
@@ -323,27 +338,83 @@ class MedicalVectorStore:
         if coll is None:
             return []
 
+        rows = self._run_query(coll, query, top_k)
+        out: list[CodeSearchResult] = []
+        for row in rows:
+            meta = row.get("metadata") or {}
+            out.append(
+                CodeSearchResult(
+                    code=row.get("id", ""),
+                    description=meta.get("description", row.get("document", "")),
+                    similarity_score=self._distance_to_similarity(row.get("distance")),
+                    metadata=meta,
+                )
+            )
+        return out
+
+    def _run_health_check(self) -> bool:
+        if self._client is None:
+            return False
         try:
-            results = coll.query(query_texts=[query], n_results=top_k)
+            if hasattr(self._client, "heartbeat"):
+                self._client.heartbeat()
+                return True
+            if hasattr(self._client, "list_collections"):
+                self._client.list_collections()
+                return True
         except Exception as exc:
-            logger.error("Code search failed in %s: %s", collection, exc)
+            logger.warning("ChromaDB client heartbeat failed: %s", exc)
+            return False
+        return True
+
+    def _run_query(self, collection: Any, query: str, top_k: int) -> list[dict[str, Any]]:
+        try:
+            raw = collection.query(query_texts=[query], n_results=top_k)
+        except Exception as exc:
+            logger.error("Vector query failed: %s", exc)
+            return []
+        return self._normalize_query_response(raw)
+
+    def _normalize_query_response(self, raw: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not raw:
             return []
 
-        out: list[CodeSearchResult] = []
-        if results and results["ids"]:
-            for i, code_id in enumerate(results["ids"][0]):
-                meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                dist = results["distances"][0][i] if results["distances"] else 1.0
-                similarity = max(0.0, 1.0 - dist)
-                out.append(
-                    CodeSearchResult(
-                        code=code_id,
-                        description=meta.get("description", ""),
-                        similarity_score=similarity,
-                        metadata=meta,
-                    )
-                )
-        return out
+        ids = self._flatten_result_field(raw.get("ids"))
+        metas = self._flatten_result_field(raw.get("metadatas"))
+        dists = self._flatten_result_field(raw.get("distances"))
+        docs = self._flatten_result_field(raw.get("documents"))
+
+        max_len = max(len(ids), len(metas), len(dists), len(docs))
+        rows: list[dict[str, Any]] = []
+        for idx in range(max_len):
+            rows.append(
+                {
+                    "id": ids[idx] if idx < len(ids) else "",
+                    "metadata": metas[idx] if idx < len(metas) else {},
+                    "distance": dists[idx] if idx < len(dists) else None,
+                    "document": docs[idx] if idx < len(docs) else "",
+                }
+            )
+        return rows
+
+    def _flatten_result_field(self, value: Optional[Any]) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, tuple):
+            value = list(value)
+        if isinstance(value, list):
+            if value and isinstance(value[0], list):
+                return value[0]
+            return value
+        return [value]
+
+    def _distance_to_similarity(self, distance: Optional[float]) -> float:
+        if distance is None:
+            return 0.0
+        try:
+            return max(0.0, 1.0 - float(distance))
+        except (TypeError, ValueError):
+            return 0.0
 
     def __repr__(self) -> str:
         return f"MedicalVectorStore(initialized={self._initialized})"

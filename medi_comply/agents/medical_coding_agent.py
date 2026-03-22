@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import os
 from typing import Any, Optional
 
 from medi_comply.core.agent_base import AgentState, AgentType, BaseAgent
@@ -43,7 +44,7 @@ class MedicalCodingAgent(BaseAgent):
         )
         self.km = knowledge_manager
         self.config = config
-        self.llm_client = llm_client
+        self.llm_client = llm_client or self._create_llm_client()
         self.decision_engine = CodingDecisionEngine(knowledge_manager)
         self.max_retries = config.guardrail.max_retries if hasattr(config, "guardrail") else 3
 
@@ -55,6 +56,8 @@ class MedicalCodingAgent(BaseAgent):
         payload = message.payload
         scr = StructuredClinicalRepresentation(**payload.get("scr", {}))
         context = CodeRetrievalContext(**payload.get("context", {}))
+        attempt = payload.get("attempt", 1)
+        previous_feedback = payload.get("feedback") or []
         
         self._logger.info(f"{self.agent_name}: Filtering assertion contexts")
         
@@ -68,8 +71,8 @@ class MedicalCodingAgent(BaseAgent):
             context=filtered_context,
             scr=scr,
             llm_client=self.llm_client,
-            attempt=1,
-            previous_feedback=None
+            attempt=attempt,
+            previous_feedback=previous_feedback
         )
 
         self.transition_state(AgentState.VALIDATING)
@@ -88,6 +91,24 @@ class MedicalCodingAgent(BaseAgent):
             payload=result.model_dump()
         )
 
+    def _create_llm_client(self):
+        """Instantiate an LLM client if environment credentials are present."""
+        try:
+            from medi_comply.core.llm_client import LLMClient
+        except ImportError:  # pragma: no cover
+            self._logger.warning("LLMClient unavailable; falling back to deterministic rules")
+            return None
+
+        if os.environ.get("OPENAI_API_KEY"):
+            return LLMClient(provider="openai")
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return LLMClient(provider="anthropic")
+        if os.environ.get("OLLAMA_URL"):
+            return LLMClient(provider="ollama", base_url=os.environ["OLLAMA_URL"])
+
+        self._logger.warning("No LLM API credentials detected. Using rule-based fallback only.")
+        return None
+
     async def process_with_retry(
         self,
         message: AgentMessage,
@@ -95,49 +116,52 @@ class MedicalCodingAgent(BaseAgent):
         attempt: int = 1
     ) -> AgentResponse:
         """Process with retry support."""
+
         if self.state in [AgentState.IDLE, AgentState.RETRY]:
-             self.transition_state(AgentState.THINKING)
+            self.transition_state(AgentState.THINKING)
 
         if attempt > self.max_retries:
-             self.transition_state(AgentState.ERROR)
-             self.transition_state(AgentState.ESCALATED)
-             return AgentResponse(
-                 agent_id=self.agent_id,
-                 original_message_id=message.message_id,
-                 from_agent=self.agent_name,
-                 status="FAILURE",
-                 payload={"error": "Max retries exceeded", "feedback": compliance_feedback}
-             )
+            self.transition_state(AgentState.ERROR)
+            self.transition_state(AgentState.ESCALATED)
+            return AgentResponse(
+                agent_id=self.agent_id,
+                original_message_id=message.message_id,
+                from_agent=self.agent_name,
+                status="FAILURE",
+                payload={"error": "Max retries exceeded", "feedback": compliance_feedback}
+            )
 
         payload = message.payload
         scr = StructuredClinicalRepresentation(**payload.get("scr", {}))
         context = CodeRetrievalContext(**payload.get("context", {}))
-        
+        attempt = payload.get("attempt", attempt)
+        previous_feedback = payload.get("feedback") or compliance_feedback or []
+
         encounter_type = scr.patient_context.get("encounter_type", "INPATIENT") if scr.patient_context else "INPATIENT"
         filtered_context = self._filter_by_assertion(context, encounter_type, scr)
 
         self.transition_state(AgentState.PROPOSING)
         result = await self.decision_engine.make_decisions(
-             context=filtered_context,
-             scr=scr,
-             llm_client=self.llm_client,
-             attempt=attempt,
-             previous_feedback=compliance_feedback
+            context=filtered_context,
+            scr=scr,
+            llm_client=self.llm_client,
+            attempt=attempt,
+            previous_feedback=previous_feedback
         )
         self.transition_state(AgentState.VALIDATING)
 
         if result.requires_human_review:
-             self.transition_state(AgentState.ESCALATED)
+            self.transition_state(AgentState.ESCALATED)
         else:
-             self.transition_state(AgentState.APPROVED)
-             self.transition_state(AgentState.COMPLETED)
-        
+            self.transition_state(AgentState.APPROVED)
+            self.transition_state(AgentState.COMPLETED)
+
         return AgentResponse(
-             agent_id=self.agent_id,
-             original_message_id=message.message_id,
-             from_agent=self.agent_name,
-             status="SUCCESS",
-             payload=result.model_dump()
+            agent_id=self.agent_id,
+            original_message_id=message.message_id,
+            from_agent=self.agent_name,
+            status="SUCCESS",
+            payload=result.model_dump()
         )
 
     def _filter_by_assertion(

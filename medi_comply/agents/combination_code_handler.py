@@ -150,10 +150,13 @@ class CombinationCodeHandler:
                     desc = self.km.icd10_db.get_code(combo_code).description if self.km.icd10_db.get_code(combo_code) else f"Combo Code {combo_code}"
 
                     addtl_needed = []
+                    stage_code = self._infer_ckd_stage_code(scr)
                     if combo_code in rule["additional_patterns"]:
                         for req in rule["additional_patterns"][combo_code]:
+                            suggested_code = stage_code if "N18" in req and stage_code else None
                             addtl_needed.append(AdditionalCodeRequirement(
                                 instruction=f"Use additional code {req}",
+                                suggested_code=suggested_code,
                                 determination_source="combination rule"
                             ))
 
@@ -232,3 +235,38 @@ class CombinationCodeHandler:
 
     def _check_code_first_requirements(self, code: str) -> list[str]:
         return []
+
+    def _infer_ckd_stage_code(self, scr: StructuredClinicalRepresentation) -> Optional[str]:
+        """Best-effort extraction of CKD stage codes from the SCR text."""
+
+        stage_map = [
+            ("stage 5", "N18.5"),
+            ("stage v", "N18.5"),
+            ("stage 4", "N18.4"),
+            ("stage iv", "N18.4"),
+            ("stage 3b", "N18.32"),
+            ("stage 3a", "N18.31"),
+            ("stage 3", "N18.30"),
+            ("stage iii", "N18.30"),
+            ("stage 2", "N18.2"),
+            ("stage ii", "N18.2"),
+            ("stage 1", "N18.1"),
+            ("stage i", "N18.1"),
+            ("end stage", "N18.6"),
+        ]
+
+        texts: list[str] = []
+        for condition in getattr(scr, "conditions", []):
+            text = ""
+            if isinstance(condition, dict):
+                text = condition.get("text") or condition.get("normalized_text") or ""
+            else:
+                text = getattr(condition, "text", "") or getattr(condition, "normalized_text", "")
+            if text:
+                texts.append(text.lower())
+
+        haystack = " ".join(texts)
+        for phrase, code in stage_map:
+            if phrase in haystack:
+                return code
+        return None

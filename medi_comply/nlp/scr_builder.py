@@ -43,6 +43,7 @@ class LabResult:
     unit: str = ""
     reference_range: str = ""
     is_abnormal: bool = False
+    section: str = "UNKNOWN"
     evidence: Optional[SourceEvidence] = None
 
 
@@ -58,6 +59,7 @@ class ConditionEntry:
     laterality: Optional[str] = None
     body_site: str = "unspecified"
     is_primary_reason: bool = False
+    section: str = "UNKNOWN"
     evidence: list[SourceEvidence] = field(default_factory=list)
     related_entities: list[str] = field(default_factory=list)
     confidence: float = 0.90
@@ -72,6 +74,7 @@ class ProcedureEntry:
     laterality: Optional[str] = None
     body_site: str = "unspecified"
     status: str = "PLANNED"
+    section: str = "UNKNOWN"
     evidence: list[SourceEvidence] = field(default_factory=list)
     confidence: float = 0.90
 
@@ -86,6 +89,7 @@ class MedicationEntry:
     route: str = ""
     frequency: str = ""
     status: str = "ACTIVE"
+    section: str = "UNKNOWN"
     evidence: Optional[SourceEvidence] = None
     confidence: float = 0.95
 
@@ -243,6 +247,7 @@ class SCRBuilder:
                 severity=e.attributes.get("severity"),
                 laterality=e.attributes.get("laterality"),
                 body_site=e.attributes.get("body_site", "unspecified"),
+                section=e.source_evidence.section if e.source_evidence else "UNKNOWN",
                 evidence=[e.source_evidence] if e.source_evidence else [],
                 related_entities=e.related_entities,
                 confidence=e.confidence,
@@ -304,6 +309,7 @@ class SCRBuilder:
             normalized_text=e.normalized_text,
             body_site=e.attributes.get("body_site", "unspecified"),
             status=e.attributes.get("status", "PLANNED"),
+            section=e.source_evidence.section if e.source_evidence else "UNKNOWN",
             evidence=[e.source_evidence] if e.source_evidence else [],
             confidence=e.confidence,
         ) for e in entities]
@@ -330,6 +336,7 @@ class SCRBuilder:
             route=e.attributes.get("route", ""),
             frequency=e.attributes.get("frequency", ""),
             status=e.attributes.get("status", "ACTIVE"),
+            section=e.source_evidence.section if e.source_evidence else "UNKNOWN",
             evidence=e.source_evidence,
             confidence=e.confidence,
         ) for e in entities]
@@ -390,6 +397,7 @@ class SCRBuilder:
             unit=e.attributes.get("unit", ""),
             reference_range=e.attributes.get("reference_range", ""),
             is_abnormal=e.attributes.get("is_abnormal", False),
+            section=e.source_evidence.section if e.source_evidence else "UNKNOWN",
             evidence=e.source_evidence,
         ) for e in entities]
 
