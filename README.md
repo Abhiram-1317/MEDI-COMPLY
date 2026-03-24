@@ -7,7 +7,7 @@ MEDI-COMPLY is an enterprise-ready, multi-agent AI platform that transforms raw 
 <p align="center">
 	<img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" />
 	<img src="https://img.shields.io/badge/FastAPI-0.110+-009688?style=for-the-badge&logo=fastapi&logoColor=white" />
-	<img src="https://img.shields.io/badge/Tests-1045_passing-4CAF50?style=for-the-badge&logo=pytest&logoColor=white" />
+	<img src="https://img.shields.io/badge/Tests-100%2B_passing-4CAF50?style=for-the-badge&logo=pytest&logoColor=white" />
 	<img src="https://img.shields.io/badge/Compliance-23_checks-orange?style=for-the-badge" />
 </p>
 
@@ -31,6 +31,7 @@ MEDI-COMPLY is an enterprise-ready, multi-agent AI platform that transforms raw 
 - [Data Models & Schemas](#-data-models--schemas)
 - [Quick Start](#-quick-start)
 - [Testing](#-testing)
+- [CI/CD & Security](#-cicd--security)
 - [Environment Variables](#-environment-variables)
 - [Project Statistics](#-project-statistics)
 - [Project Structure](#-project-structure)
@@ -243,7 +244,7 @@ docker compose up --build
 
 ## 🧪 Testing
 
-Full suite (1045 tests):
+Full suite:
 
 ```bash
 python -m pytest medi_comply/tests/ -v
@@ -255,6 +256,12 @@ Targeted runs:
 python -m pytest medi_comply/tests/test_claims_adjudication.py -v
 python -m pytest medi_comply/tests/test_fraud_detector.py -k upcoding_mi_overcoding -v
 python -m pytest medi_comply/tests/test_core.py -v
+
+# Guardrail and adversarial suites
+python -m pytest medi_comply/tests/test_coding_api_adversarial.py -v
+python -m pytest medi_comply/tests/test_guardrail_penetration.py -v
+python -m pytest medi_comply/tests/test_calibration.py -v
+python -m pytest medi_comply/tests/test_compliance_scenarios.py -v
 ```
 
 Coverage / debugging aids:
@@ -287,6 +294,30 @@ python -m pytest medi_comply/tests/ --cov=medi_comply --cov-report=html
 | `AUDIT_RETENTION_DAYS` | `2555` | ~7 years retention. |
 | `SECURITY_ENABLE_PHI_DETECTION` | `true` | Prompt PHI scanning toggle. |
 | `SECURITY_ENABLE_PROMPT_INJECTION_DETECTION` | `true` | Prompt safety toggle. |
+
+---
+
+## 🔄 CI/CD & Security
+
+- **CI pipeline** (`.github/workflows/ci.yml`) runs on push/PR for `main`, `develop`, and `feature/**` branches: lint/format (flake8, black, isort, mypy), tests on Python 3.11/3.12 with coverage artifacts, guardrail/adversarial/calibration/compliance suites, API smoke test, Docker build, and a summary.
+- **Security scan** (`.github/workflows/security.yml`) runs on push/PR to `main` and weekly (Mon 06:00 UTC): safety + pip-audit for dependencies, Bandit with JSON artifact, secret grep, and HIPAA-oriented checks.
+- **PR template** (`.github/pull_request_template.md`) enforces compliance/guardrail and testing checklists.
+
+To run the same checks locally:
+
+```bash
+# Lint/format
+black --check medi_comply/ && isort --check-only medi_comply/ && flake8 medi_comply/
+mypy medi_comply/ --ignore-missing-imports --no-error-summary
+
+# Tests with coverage
+python -m pytest medi_comply/tests/ --cov=medi_comply --cov-report=term-missing
+
+# Security quick pass
+safety check -r medi_comply/requirements.txt
+pip-audit
+bandit -r medi_comply/ -ll --skip B101,B311
+```
 
 ---
 
@@ -331,7 +362,10 @@ MEDI-COMPLY/
 │   ├── demo_app.py           # Streamlit judge UI
 │   ├── system.py             # MediComplySystem orchestrator
 │   └── requirements.txt      # Python deps
-├── tests/                    # pytest suites (core, nlp, retrieval, guardrails, audit)
+├── medi_comply/tests/        # pytest suites (core, nlp, retrieval, guardrails, audit, adversarial)
+├── .github/workflows/        # CI (ci.yml) and security (security.yml)
+├── .github/pull_request_template.md
+├── .github/ISSUE_TEMPLATE/   # bug_report.md
 ├── run_demo.py               # One-click (tests + Streamlit) launcher
 ├── README.md                 # This document
 └── medi_comply/.env.example  # Config template

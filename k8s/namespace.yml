@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: medi-comply
+  labels:
+    app: medi-comply
+    environment: production
+    compliance: hipaa
+  annotations:
+    description: "MEDI-COMPLY Healthcare AI System - HIPAA Compliant"

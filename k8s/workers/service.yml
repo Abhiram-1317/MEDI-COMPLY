@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workers-service
+  namespace: medi-comply
+  labels:
+    app: medi-comply
+    component: workers
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service for workers
+  selector:
+    app: medi-comply
+    component: workers
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090

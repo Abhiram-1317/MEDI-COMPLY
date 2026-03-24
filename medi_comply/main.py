@@ -23,6 +23,11 @@ from medi_comply.core.message_bus import AsyncMessageBus
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
 from medi_comply.api.routes.knowledge import router as knowledge_router
 from medi_comply.api.routes.claims import router as claims_router
+from medi_comply.api.routes.coding import router as coding_router
+from medi_comply.api.routes.prior_auth import router as prior_auth_router
+from medi_comply.api.routes.audit import audit_router, compliance_router
+from medi_comply.api.auth import auth_router
+from medi_comply.api.rate_limiter import rate_limit_router
 
 try:  # Optional dependency; app must run even if compliance module is absent
     from medi_comply.compliance.hipaa_guard import HIPAAAccessLogger
@@ -151,6 +156,12 @@ if hipaa_access_logger is not None:
 # Routers
 app.include_router(knowledge_router)
 app.include_router(claims_router)
+app.include_router(coding_router)
+app.include_router(prior_auth_router)
+app.include_router(audit_router)
+app.include_router(compliance_router)
+app.include_router(auth_router)
+app.include_router(rate_limit_router)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,47 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chroma
+  namespace: medi-comply
+  labels:
+    app: medi-comply
+    component: chroma
+    tier: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: medi-comply
+      component: chroma
+  template:
+    metadata:
+      labels:
+        app: medi-comply
+        component: chroma
+        tier: database
+    spec:
+      containers:
+        - name: chroma
+          image: chromadb/chroma:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ANONYMIZED_TELEMETRY
+              value: "false"
+            - name: PERSIST_DIRECTORY
+              value: "/chroma/data"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: chroma-data
+              mountPath: /chroma/data
+      volumes:
+        - name: chroma-data
+          emptyDir:
+            sizeLimit: 10Gi

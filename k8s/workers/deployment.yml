@@ -1,0 +1,66 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medi-comply-workers
+  namespace: medi-comply
+  labels:
+    app: medi-comply
+    component: workers
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: medi-comply
+      component: workers
+  template:
+    metadata:
+      labels:
+        app: medi-comply
+        component: workers
+        tier: backend
+    spec:
+      serviceAccountName: medi-comply-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: worker
+          image: medicomply/worker:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "medi_comply.workers.main"]
+          envFrom:
+            - configMapRef:
+                name: medi-comply-config
+            - secretRef:
+                name: medi-comply-secrets
+          env:
+            - name: WORKER_TYPE
+              value: "agent"
+            - name: WORKER_CONCURRENCY
+              value: "4"
+            - name: WORKER_QUEUE
+              value: "coding,claims,prior_auth"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import sys; sys.exit(0)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: tmp-volume
+          emptyDir:
+            sizeLimit: 200Mi

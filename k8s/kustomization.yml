@@ -1,0 +1,41 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: medi-comply
+
+resources:
+  - namespace.yml
+  - secrets.yml
+  - configmap.yml
+  - api/deployment.yml
+  - api/service.yml
+  - api/hpa.yml
+  - workers/deployment.yml
+  - workers/service.yml
+  - nlp/deployment.yml
+  - nlp/service.yml
+  - guardrail/deployment.yml
+  - guardrail/service.yml
+  - databases/postgres-pvc.yml
+  - databases/postgres-deployment.yml
+  - databases/postgres-service.yml
+  - databases/redis-deployment.yml
+  - databases/redis-service.yml
+  - databases/chroma-deployment.yml
+  - databases/chroma-service.yml
+  - ingress.yml
+  - network-policy.yml
+
+commonLabels:
+  app: medi-comply
+  managed-by: kustomize
+
+images:
+  - name: medicomply/api
+    newTag: latest
+  - name: medicomply/worker
+    newTag: latest
+  - name: medicomply/nlp
+    newTag: latest
+  - name: medicomply/guardrail
+    newTag: latest

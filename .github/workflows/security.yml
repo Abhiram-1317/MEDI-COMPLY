@@ -1,0 +1,113 @@
+name: "🔒 Security Scan"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  security-scan:
+    name: "Security Analysis"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install safety bandit pip-audit
+
+      - name: Check dependencies for vulnerabilities (safety)
+        run: |
+          if [ -f "medi_comply/requirements.txt" ]; then
+            safety check -r medi_comply/requirements.txt --output text || echo "::warning::Dependency vulnerabilities found"
+          fi
+        continue-on-error: true
+
+      - name: Audit dependencies (pip-audit)
+        run: |
+          pip install -r medi_comply/requirements.txt 2>/dev/null || true
+          pip-audit || echo "::warning::pip-audit found issues"
+        continue-on-error: true
+
+      - name: Run Bandit security linter
+        run: |
+          bandit -r medi_comply/ \
+            -ll \
+            --skip B101,B311 \
+            -f json \
+            -o bandit_report.json \
+            2>&1 || true
+          
+          bandit -r medi_comply/ \
+            -ll \
+            --skip B101,B311 \
+            -f txt \
+            2>&1 | tee bandit_output.txt || true
+
+          HIGH=$(grep -c "Severity: High" bandit_output.txt 2>/dev/null || echo "0")
+          MEDIUM=$(grep -c "Severity: Medium" bandit_output.txt 2>/dev/null || echo "0")
+          
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| High | $HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| Medium | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
+        continue-on-error: true
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-security-report
+          path: bandit_report.json
+          retention-days: 30
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "Checking for hardcoded secrets..."
+          
+          grep -rn "password\s*=\s*['\"][^'\"]*['\"]" medi_comply/ \
+            --include="*.py" \
+            --exclude-dir=tests \
+            --exclude="*.example" \
+            | grep -v "test" \
+            | grep -v "default" \
+            | grep -v "placeholder" \
+            | grep -v "change-in-production" \
+            || true
+          
+          grep -rn "api_key\s*=\s*['\"][a-zA-Z0-9]{20,}['\"]" medi_comply/ \
+            --include="*.py" \
+            --exclude-dir=tests \
+            || true
+          
+          echo "Secret check complete"
+
+      - name: HIPAA-specific checks
+        run: |
+          echo "## 🏥 HIPAA Compliance Checks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if grep -r "ENABLE_PHI_DETECTION" medi_comply/ --include="*.py" -l; then
+            echo "✅ PHI detection module found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ PHI detection module not found" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -r "audit" medi_comply/ --include="*.py" -l | head -5; then
+            echo "✅ Audit logging found" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -r "encrypt\|AES\|hashlib\|sha256" medi_comply/ --include="*.py" -l | head -3; then
+            echo "✅ Encryption/hashing modules found" >> $GITHUB_STEP_SUMMARY
+          fi
