@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from medi_comply.core.json_repair import JSONRepair
+
+try:  # Optional dependency; degrade gracefully if compliance module is absent
+    from medi_comply.compliance.hipaa_guard import LLMPHISafetyChecker
+except Exception:  # pragma: no cover - optional dependency
+    LLMPHISafetyChecker = None  # type: ignore
+
+if TYPE_CHECKING:  # pragma: no cover
+    from medi_comply.compliance.hipaa_guard import LLMPHISafetyChecker as _LLMPHISafetyChecker
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMResponse(BaseModel):
@@ -40,6 +52,7 @@ class LLMClient:
         max_retries: int = 3,
         timeout_seconds: int = 60,
         max_context_tokens: int = 12000,
+        phi_safety_enabled: bool = True,
     ) -> None:
         provider = provider.lower()
         if provider not in self.SUPPORTED_PROVIDERS:
@@ -52,6 +65,8 @@ class LLMClient:
         self.max_retries = max_retries
         self.timeout = timeout_seconds
         self.max_context_tokens = max_context_tokens
+        self.phi_safety_enabled = phi_safety_enabled
+        self._phi_checker: Optional[LLMPHISafetyChecker] = None
 
         self.total_calls = 0
         self.total_tokens = 0
@@ -331,4 +346,93 @@ class LLMClient:
             "total_latency_ms": self.total_latency_ms,
             "errors": self.errors,
             "avg_latency_ms": avg_latency,
+        }
+
+    def _is_dev_or_mock(self) -> bool:
+        env = os.environ.get("ENV", "").lower()
+        return self.provider == "mock" or env in {"dev", "development", "test"}
+
+    async def safe_generate(self, prompt: str, **kwargs) -> dict:
+        """Run LLM with optional PHI safety pipeline.
+
+        Returns a dict with response text and flags indicating whether PHI handling occurred.
+        """
+
+        system_prompt = kwargs.pop("system_prompt", "")
+        temperature = kwargs.pop("temperature", 0.1)
+        max_tokens = kwargs.pop("max_tokens", 2000)
+        response_format = kwargs.pop("response_format", "json")
+
+        if self._is_dev_or_mock():
+            logger.warning("Skipping PHI safety checks in mock/dev mode for provider=%s", self.provider)
+            response = await self.chat(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+            return {"response": response.content, "phi_handled": False, "deidentified": False}
+
+        if not self.phi_safety_enabled:
+            response = await self.chat(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+            return {"response": response.content, "phi_handled": False, "deidentified": False}
+
+        if LLMPHISafetyChecker is None:
+            logger.warning("HIPAA compliance module not available; proceeding without PHI safety")
+            response = await self.chat(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+            return {"response": response.content, "phi_handled": False, "deidentified": False}
+
+        if self._phi_checker is None:
+            self._phi_checker = LLMPHISafetyChecker()  # type: ignore[operator]
+
+        async def llm_call(deid_prompt: str) -> str:
+            response = await self.chat(
+                system_prompt=system_prompt,
+                user_prompt=deid_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+            if not response.success:
+                raise RuntimeError(response.error or "LLM call failed")
+            return response.content
+
+        pipeline_result = await self._phi_checker.safe_llm_pipeline(prompt, llm_call)  # type: ignore[union-attr]
+        audit = pipeline_result.get("audit_entry", {})
+
+        logger.info(
+            "PHI safety pipeline %s pre=%s post=%s tokens_restored=%s tokens_failed=%s",
+            audit.get("pipeline_id"),
+            audit.get("pre_phi_found"),
+            audit.get("post_phi_found"),
+            audit.get("tokens_restored"),
+            audit.get("tokens_failed"),
+        )
+
+        pre_phi_count = audit.get("pre_phi_found", 0) or 0
+        post_phi_count = audit.get("post_phi_found", 0) or 0
+        if pre_phi_count or post_phi_count:
+            logger.debug(
+                "PHI handling details: pre_check=%s post_check=%s",
+                pipeline_result.get("pre_check"),
+                pipeline_result.get("post_check"),
+            )
+
+        return {
+            "response": pipeline_result.get("response", ""),
+            "phi_handled": pipeline_result.get("phi_handled", False),
+            "deidentified": pre_phi_count > 0,
         }

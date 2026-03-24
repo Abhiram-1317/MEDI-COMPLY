@@ -90,7 +90,7 @@ class PipelineContext:
 
         self.raw_input: Any = None
         self.input_reference: Optional[InputReference] = None
-        self.patient_context: Optional[dict] = None
+        self.patient_context: dict[str, Any] = {}
 
         self.ingested_document: Optional[IngestedDocument] = None
         self.scr: Optional[StructuredClinicalRepresentation] = None

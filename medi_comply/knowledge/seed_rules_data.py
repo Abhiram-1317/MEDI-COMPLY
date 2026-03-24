@@ -1,13 +1,13 @@
 """Seed data: NCCI edit pairs, MUE entries, LCD entries, and Coding Guidelines."""
 from medi_comply.knowledge.ncci_engine import NCCIEditPair, MUEEntry
 from medi_comply.knowledge.medical_necessity import CoverageDetermination
-from medi_comply.knowledge.coding_guidelines import CodingGuideline, CodingExample
+from medi_comply.knowledge.coding_guidelines import CodingGuideline, GuidelineExample
 
 _P = NCCIEditPair
 _M = MUEEntry
 _L = CoverageDetermination
 _G = CodingGuideline
-_X = CodingExample
+_X = GuidelineExample
 
 
 def get_ncci_pairs() -> list[NCCIEditPair]:

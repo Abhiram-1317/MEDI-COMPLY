@@ -247,11 +247,11 @@ class ModelRegistry:
         return sorted(candidates, key=key_fn, reverse=True)[0]
 
 
-    # Module-level registry instance for convenience/DI-free contexts.
-    MODEL_REGISTRY = ModelRegistry()
-    # Backward-compatible enum aliases to satisfy alternate naming expectations.
-    UseCaseType = UseCase
-    EnvironmentType = Environment
+# Module-level registry instance for convenience/DI-free contexts.
+MODEL_REGISTRY = ModelRegistry()
+# Backward-compatible enum aliases to satisfy alternate naming expectations.
+UseCaseType = UseCase
+EnvironmentType = Environment
 
 
 class ModelSelectionGuard:

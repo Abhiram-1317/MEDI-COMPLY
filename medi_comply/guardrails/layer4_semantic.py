@@ -11,9 +11,11 @@ from pydantic import BaseModel
 from medi_comply.schemas.coding_result import CodingResult
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
 from medi_comply.schemas.retrieval import CodeRetrievalContext
+from medi_comply.knowledge.coding_guidelines import CodingGuidelinesEngine, EncounterType, Severity
 from medi_comply.core.json_repair import JSONRepair
 from medi_comply.core.logger import get_logger
 from medi_comply.core.utils import safe_get_code, safe_get_text
+from medi_comply.compliance.fraud_detector import FraudDetector, FraudSeverity
 
 
 logger = get_logger(__name__)
@@ -42,6 +44,7 @@ class SemanticGuardrails:
     def __init__(self, llm_client: Any = None, config: Any = None):
         self.llm_client = llm_client
         self.config = config
+        self.coding_guidelines_engine = CodingGuidelinesEngine()
     
     async def run_all_checks(
         self,
@@ -57,7 +60,7 @@ class SemanticGuardrails:
         results.append(await self.check_14_evidence_sufficiency(coding_result, scr))
         results.append(await self.check_15_reasoning_validity(coding_result))
         results.append(await self.check_16_completeness(coding_result, scr))
-        results.append(await self.check_17_upcoding_detection(coding_result, scr))
+        results.append(await self.check_17_upcoding_detection(coding_result, scr, retrieval_context))
         results.append(await self.check_18_guideline_compliance(coding_result, scr))
         return results
 
@@ -101,42 +104,164 @@ class SemanticGuardrails:
         self, coding_result: CodingResult, scr: StructuredClinicalRepresentation
     ) -> SemanticCheckResult:
         start = time.time()
-        passed = len(coding_result.diagnosis_codes) > 0 or len(coding_result.procedure_codes) > 0
+        has_codes = len(coding_result.diagnosis_codes) > 0 or len(coding_result.procedure_codes) > 0
+        any_evidence = any(dec.clinical_evidence for dec in (coding_result.diagnosis_codes + coding_result.procedure_codes))
         prompt = "Confirm that all clinically documented problems/procedures are represented by a code."
         context = self._build_review_prompt(coding_result, scr)
+        if has_codes and not any_evidence:
+            return self._make_result(
+                "CHECK_16_COMPLETENESS",
+                "Code Completeness",
+                False,
+                "HARD_FAIL",
+                "Codes assigned without linked clinical evidence (potential phantom billing).",
+                start=start,
+            )
         payload = await self._invoke_llm_reviewer("CHECK_16_COMPLETENESS", prompt, context)
         if payload:
             return self._payload_to_result("CHECK_16_COMPLETENESS", "Code Completeness", payload, start)
-        if not passed:
+        if not has_codes:
             return self._make_result("CHECK_16_COMPLETENESS", "Code Completeness", False, "SOFT_FAIL", "Missing documented conditions from code selection.", start=start)
         return self._make_result("CHECK_16_COMPLETENESS", "Code Completeness", True, "NONE", "All documented conditions captured.", start=start)
 
     async def check_17_upcoding_detection(
-        self, coding_result: CodingResult, scr: StructuredClinicalRepresentation
+        self,
+        coding_result: CodingResult,
+        scr: StructuredClinicalRepresentation,
+        retrieval_context: Optional[CodeRetrievalContext] = None,
     ) -> SemanticCheckResult:
         start = time.time()
-        prompt = "Detect potential upcoding by comparing documentation severity with selected codes."
-        context = self._build_review_prompt(coding_result, scr)
-        payload = await self._invoke_llm_reviewer("CHECK_17_UPCODING", prompt, context)
-        if payload:
-            return self._payload_to_result("CHECK_17_UPCODING", "Upcoding Detection", payload, start)
-        for code in coding_result.diagnosis_codes:
-            description = (safe_get_text(code) or "").lower()
-            if "severe" in description and "mild" in str(scr).lower():
-                code_value = safe_get_code(code) or "UNKNOWN"
-                return self._make_result("CHECK_17_UPCODING", "Upcoding Detection", False, "HARD_FAIL", f"Upcoding detected for {code_value}", [code_value], start=start)
-        return self._make_result("CHECK_17_UPCODING", "Upcoding Detection", True, "NONE", "No upcoding risks detected.", start=start)
+        ncci_engine = getattr(self.config, "ncci_engine", None) if self.config else None
+        knowledge_manager = getattr(self.config, "knowledge_manager", None) if self.config else None
+        fraud_detector = FraudDetector(ncci_engine=ncci_engine, knowledge_manager=knowledge_manager)
+
+        assigned_codes = self._build_assigned_codes_payload(coding_result)
+        confidence_scores = {item["code"]: item.get("confidence", 0.5) for item in assigned_codes}
+        evidence_snippets = self._collect_clinical_evidence(coding_result, scr)
+        encounter_type = coding_result.encounter_type
+
+        fraud_result = fraud_detector.scan_coding_decision(
+            assigned_codes=assigned_codes,
+            clinical_evidence=evidence_snippets,
+            encounter_type=encounter_type,
+            patient_demographics=getattr(scr, "patient_context", {}) or {},
+            confidence_scores=confidence_scores,
+        )
+
+        alerts = fraud_result.alerts
+        if not alerts:
+            return self._make_result("CHECK_17_UPCODING", "Upcoding Detection", True, "NONE", "No fraud or upcoding indicators detected.", start=start)
+
+        highest = self._highest_alert_severity(alerts)
+        affected = [a.code_involved for a in alerts if a.code_involved]
+        suggestions = []
+        for alert in alerts:
+            suggestions.extend(fraud_detector.suggest_correct_codes(alert))
+        suggestion_lines = [f"{s['code']}: {s['description']} ({s['reasoning']})" for s in suggestions]
+
+        alert_lines = [
+            f"[{a.severity}] {a.fraud_type}: {a.description} | code={a.code_involved} | rule={a.rule_triggered} | action={a.recommended_action}"
+            for a in alerts
+        ]
+        details_parts = [
+            f"Risk Score: {fraud_result.overall_risk_score:.2f} ({fraud_result.risk_level})",
+            "Alerts:\n- " + "\n- ".join(alert_lines),
+        ]
+        if suggestion_lines:
+            details_parts.append("Suggested corrections:\n- " + "\n- ".join(suggestion_lines))
+
+        passed = highest == FraudSeverity.LOW
+        severity_map = {
+            FraudSeverity.LOW: "NONE",
+            FraudSeverity.MEDIUM: "SOFT_FAIL",
+            FraudSeverity.HIGH: "HARD_FAIL",
+            FraudSeverity.CRITICAL: "HARD_FAIL",
+        }
+        severity = severity_map.get(highest, "FAIL") if not passed else "NONE"
+        if highest == FraudSeverity.CRITICAL:
+            details_parts.append("ESCALATION: UPCODING_SUSPECTED")
+
+        return self._make_result(
+            "CHECK_17_UPCODING",
+            "Upcoding Detection",
+            passed,
+            severity,
+            " | ".join(details_parts),
+            affected,
+            start=start,
+        )
 
     async def check_18_guideline_compliance(
         self, coding_result: CodingResult, scr: StructuredClinicalRepresentation
     ) -> SemanticCheckResult:
         start = time.time()
-        prompt = "Review adherence to Official Coding Guidelines, sequencing rules, and use additional instructions."
-        context = self._build_review_prompt(coding_result, scr)
-        payload = await self._invoke_llm_reviewer("CHECK_18_GUIDELINES", prompt, context)
-        if payload:
-            return self._payload_to_result("CHECK_18_GUIDELINES", "Guideline Compliance", payload, start)
-        return self._make_result("CHECK_18_GUIDELINES", "Guideline Compliance", True, "NONE", "Coding follows current OCG.", start=start)
+
+        icd10_codes = [safe_get_code(c) or c.code for c in coding_result.diagnosis_codes]
+        encounter = EncounterType(coding_result.encounter_type)
+        primary_dx = safe_get_code(coding_result.principal_diagnosis) if coding_result.principal_diagnosis else (icd10_codes[0] if icd10_codes else None)
+
+        compliance = self.coding_guidelines_engine.check_compliance(
+            icd10_codes=icd10_codes,
+            encounter_type=encounter,
+            primary_dx=primary_dx,
+            patient_age=coding_result.patient_age,
+            patient_gender=coding_result.patient_gender,
+        )
+
+        sequencing = self.coding_guidelines_engine.get_sequencing_rules(icd10_codes, encounter)
+        combination = self.coding_guidelines_engine.get_combination_guidance([c.description for c in coding_result.diagnosis_codes])
+
+        violation_lines = [
+            f"{v.guideline_id} ({v.severity.value}): {v.guideline_title} — {v.description} | Correction: {v.correction} | Excerpt: {v.guideline_text}"
+            for v in compliance.violations
+        ]
+        warning_lines = [
+            f"{w.guideline_id} (WARNING): {w.description} | Suggestion: {w.suggestion}"
+            for w in compliance.warnings
+        ]
+
+        citations = [self.coding_guidelines_engine.format_guideline_citation(gid) for gid in compliance.applicable_guidelines[:6]]
+
+        detail_parts = []
+        if violation_lines:
+            detail_parts.append("Violations detected:\n- " + "\n- ".join(violation_lines))
+        if warning_lines:
+            detail_parts.append("Warnings:\n- " + "\n- ".join(warning_lines))
+        if sequencing:
+            detail_parts.append(
+                f"Sequencing guidance: principal={sequencing.get('principal')} | {sequencing.get('rationale')} | {sequencing.get('citation')}"
+            )
+        if combination.get("use_combination_code"):
+            detail_parts.append(
+                f"Combination suggestion: use {combination.get('recommended_code')} because {combination.get('reason')} ({combination.get('citation')})"
+            )
+        if citations:
+            detail_parts.append("Citations: " + "; ".join(citations))
+
+        has_error = any(v.severity == Severity.ERROR for v in compliance.violations)
+
+        if has_error:
+            details = " | ".join(detail_parts) if detail_parts else "OCG violations present."
+            return self._make_result(
+                "CHECK_18_GUIDELINES",
+                "Guideline Compliance",
+                False,
+                "HARD_FAIL",
+                details,
+                icd10_codes,
+                start=start,
+            )
+
+        details = " | ".join(detail_parts) if detail_parts else "Coding follows current OCG."
+        return self._make_result(
+            "CHECK_18_GUIDELINES",
+            "Guideline Compliance",
+            True,
+            "NONE",
+            details,
+            icd10_codes,
+            start=start,
+        )
 
     async def _invoke_llm_reviewer(self, check_id: str, system_prompt: str, user_prompt: str) -> Optional[dict]:
         if not self.llm_client or not hasattr(self.llm_client, "chat"):
@@ -170,6 +295,49 @@ class SemanticGuardrails:
         conf = float(payload.get("reviewer_confidence", 0.9))
         reasoning = payload.get("reviewer_reasoning", "")
         return self._make_result(check_id, name, passed, severity, details, codes, conf, reasoning, start)
+
+    def _build_assigned_codes_payload(self, coding_result: CodingResult) -> list[dict]:
+        payload: list[dict] = []
+        for decision in coding_result.diagnosis_codes + coding_result.procedure_codes:
+            payload.append(
+                {
+                    "code": safe_get_code(decision) or decision.code,
+                    "code_type": decision.code_type,
+                    "description": safe_get_text(decision) or decision.description,
+                    "modifiers": getattr(decision, "modifiers", []) or [],
+                    "alternatives": [alt.model_dump() for alt in (decision.alternatives_considered or [])],
+                    "clinical_evidence": [ev.source_text for ev in (decision.clinical_evidence or []) if getattr(ev, "source_text", None)],
+                    "confidence": decision.confidence_score,
+                }
+            )
+        return payload
+
+    def _collect_clinical_evidence(
+        self, coding_result: CodingResult, scr: StructuredClinicalRepresentation
+    ) -> list[str]:
+        snippets: list[str] = []
+        for decision in coding_result.diagnosis_codes + coding_result.procedure_codes:
+            for ev in (decision.clinical_evidence or []):
+                if getattr(ev, "source_text", None):
+                    snippets.append(ev.source_text)
+        if getattr(scr, "clinical_summary", None):
+            snippets.append(scr.clinical_summary)
+        patient_ctx = getattr(scr, "patient_context", {}) or {}
+        for value in patient_ctx.values():
+            if isinstance(value, str) and value.strip():
+                snippets.append(value)
+        return snippets
+
+    def _highest_alert_severity(self, alerts) -> FraudSeverity:
+        order = [FraudSeverity.LOW, FraudSeverity.MEDIUM, FraudSeverity.HIGH, FraudSeverity.CRITICAL]
+        max_idx = 0
+        for alert in alerts:
+            try:
+                idx = order.index(alert.severity)
+                max_idx = max(max_idx, idx)
+            except ValueError:
+                continue
+        return order[max_idx]
 
     def _build_review_prompt(self, coding_result: CodingResult, scr: StructuredClinicalRepresentation) -> str:
         dx_lines = [

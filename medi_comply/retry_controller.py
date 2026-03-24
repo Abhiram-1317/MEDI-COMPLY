@@ -34,6 +34,7 @@ class RetryController:
         retry_history: list[RetryRecord] = []
         pending_diff_source: Optional[CodingResult] = None
         latest_report: Optional[ComplianceReport] = None
+        latest_coding_result: Optional[CodingResult] = None
 
         while attempt <= self.max_retries + 1:
             context.current_attempt = attempt
@@ -56,6 +57,7 @@ class RetryController:
                 raise RuntimeError("MedicalCodingAgent returned an empty payload")
             coding_result = CodingResult.model_validate(wire_result)
             context.coding_result = coding_result
+            latest_coding_result = coding_result
 
             if pending_diff_source and retry_history:
                 retry_history[-1].codes_changed = self._extract_code_changes(pending_diff_source, coding_result)
@@ -102,10 +104,10 @@ class RetryController:
             pending_diff_source = coding_result
             attempt += 1
 
-        if latest_report is None:
+        if latest_report is None or latest_coding_result is None:
             raise RuntimeError("Retry controller exited without a compliance report")
         latest_report.overall_decision = "ESCALATE"
-        return context.coding_result, latest_report, retry_history
+        return latest_coding_result, latest_report, retry_history
 
     @staticmethod
     def _build_retry_record(attempt: int, feedback: Optional[Sequence[str]]):
@@ -137,11 +139,13 @@ class RetryController:
     def _to_wire(scr) -> dict:
         if scr is None:
             return {}
-        if is_dataclass(scr):
+        if is_dataclass(scr) and not isinstance(scr, type):
             return asdict(scr)
         if hasattr(scr, "model_dump"):
             return scr.model_dump()  # type: ignore[return-value]
-        return dict(scr)
+        if isinstance(scr, dict):
+            return dict(scr)
+        return {}
 
     @staticmethod
     def _is_same_failure(retry_history: list, current_feedback: Sequence[str]) -> bool:

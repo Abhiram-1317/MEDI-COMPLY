@@ -16,6 +16,7 @@ from medi_comply.schemas.retrieval import (
     GuidelineReference
 )
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
+from medi_comply.knowledge.coding_guidelines import EncounterType
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
 from medi_comply.core.utils import safe_get_code
 
@@ -267,23 +268,25 @@ class ContextAssembler:
         """Pull generic guidelines based on encounter type."""
         refs = []
         type_upper = encounter_type.upper()
+        try:
+            encounter_enum = EncounterType(type_upper)
+        except ValueError:
+            encounter_enum = EncounterType.OUTPATIENT
         
         # Basic OCG pull matching encounter setting
         for gl in km.guidelines._guidelines.values():
-            applies = False
-            if type_upper == "INPATIENT" and "inpatient" in gl.rule_text.lower():
-                applies = True
-            elif type_upper in ["OUTPATIENT", "EMERGENCY"] and "outpatient" in gl.rule_text.lower():
-                applies = True
+            applicable_types = getattr(gl, "applicable_encounter_types", [])
+            applies = encounter_enum in applicable_types
                 
             if applies:
+                excerpt = getattr(gl, "rule_text", gl.description)
                 refs.append(GuidelineReference(
                     guideline_id=gl.guideline_id,
                     title=gl.title,
                     section=gl.section,
                     relevance_score=0.9,
                     key_rule="Applies to " + type_upper + " encounters.",
-                    full_text=gl.rule_text[:200] + "..."
+                    full_text=excerpt[:200] + "..."
                 ))
         return refs[:3]  # Keep context small
 

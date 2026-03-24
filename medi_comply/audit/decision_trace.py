@@ -307,6 +307,8 @@ class DecisionTraceBuilder:
         now = datetime.now(timezone.utc)
         processing_time = (now - self._started_at).total_seconds() * 1000 if self._started_at else 0.0
         
+        kb_version = knowledge_base_version or "KB-2025-Q1"
+
         return WorkflowTrace(
              trace_id=self._trace_id or f"AUD-{now.strftime('%Y-%m-%d')}-{uuid.uuid4().hex[:8]}",
              workflow_type=self._workflow_type or "MEDICAL_CODING",
@@ -321,7 +323,7 @@ class DecisionTraceBuilder:
              retry_history=self._retry_records,
              total_attempts=len(self._retry_records) + 1,
              final_output=self._build_final_output(final_coding_result),
-             system_metadata=SystemMetadata(system_version=system_version, knowledge_base_version=knowledge_base_version, knowledge_base_last_updated=now.strftime("%Y-%m-%d"), models_used=models_used or {}, configuration=config or {}, deployment_environment="production"),
+             system_metadata=SystemMetadata(system_version=system_version, knowledge_base_version=kb_version, knowledge_base_last_updated=now.strftime("%Y-%m-%d"), models_used=models_used or {}, configuration=config or {}, deployment_environment="production"),
              record_hash="",          # Populated by AuditStore at insertion
              previous_record_hash="", # Populated by AuditStore at insertion
              digital_signature="SYSTEM_KEY_V1"

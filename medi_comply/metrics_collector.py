@@ -80,6 +80,8 @@ class PipelineMetricsCollector:
         knowledge_version = "UNKNOWN"
         if context.retrieval_context and context.retrieval_context.retrieval_summary:
             knowledge_version = context.retrieval_context.retrieval_summary.get("knowledge_version", knowledge_version)
+        if knowledge_version == "UNKNOWN" and getattr(context, "patient_context", None):
+            knowledge_version = context.patient_context.get("knowledge_base_version", knowledge_version)
         model_versions: Dict[str, str] = {}
         if context.llm_interactions:
             last = context.llm_interactions[-1]

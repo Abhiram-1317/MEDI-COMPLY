@@ -24,7 +24,6 @@ from medi_comply.knowledge.seed_icd10_part2 import (
 )
 from medi_comply.knowledge.seed_cpt_data import get_cpt_codes, get_modifiers
 from medi_comply.knowledge.seed_rules_data import (
-    get_coding_guidelines,
     get_lcd_entries,
     get_mue_entries,
     get_ncci_pairs,
@@ -66,9 +65,6 @@ def seed_all_data(km: "KnowledgeManager") -> None:
 
     # --- Medical Necessity ---
     km.med_necessity.load(get_lcd_entries())
-
-    # --- Coding Guidelines ---
-    km.guidelines.load(get_coding_guidelines())
 
     # --- Data integrity validation ---
     _validate_integrity(km)

@@ -7,7 +7,7 @@ MEDI-COMPLY is an enterprise-ready, multi-agent AI platform that transforms raw 
 <p align="center">
 	<img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" />
 	<img src="https://img.shields.io/badge/FastAPI-0.110+-009688?style=for-the-badge&logo=fastapi&logoColor=white" />
-	<img src="https://img.shields.io/badge/Tests-103_passing-4CAF50?style=for-the-badge&logo=pytest&logoColor=white" />
+	<img src="https://img.shields.io/badge/Tests-1045_passing-4CAF50?style=for-the-badge&logo=pytest&logoColor=white" />
 	<img src="https://img.shields.io/badge/Compliance-23_checks-orange?style=for-the-badge" />
 </p>
 
@@ -27,6 +27,7 @@ MEDI-COMPLY is an enterprise-ready, multi-agent AI platform that transforms raw 
 	- [Task 5 — Medical Coding Agent](#task-5--medical-coding-agent-agents)
 	- [Task 6 — Compliance Guardrail Engine](#task-6--compliance-guardrail-engine-guardrails)
 	- [Task 7 — Audit Trail System](#task-7--audit-trail-system-audit)
+	- [Task 8 — Claims Adjudication & API](#task-8--claims-adjudication--api-agents)
 - [Data Models & Schemas](#-data-models--schemas)
 - [Quick Start](#-quick-start)
 - [Testing](#-testing)
@@ -170,6 +171,15 @@ Supporting files: `layer3_structural.py`, `layer4_semantic.py`, `layer5_output.p
 | `risk_scorer.py` | Returns LOW → CRITICAL risk levels. |
 | `report_generator.py` | Narrative summaries, code cards, compliance certificate, JSON export. |
 
+### Task 8 — Claims Adjudication & API (`agents/`, `api/`)
+
+| Component | Purpose |
+|-----------|---------|
+| `claims_adjudication_agent.py` | Full claim pipeline: validation → eligibility/provider → line adjudication (coverage, auth, NCCI/MUE, fee schedule, cost sharing) → claim-level determination → appeal guidance. |
+| `api/routes/claims.py` | FastAPI router exposing `/api/v1/claims` for adjudicate, batch adjudicate/status, and claim validation. |
+| `system.py` (facade) | Provides `adjudicate_claim()` entry point for services. |
+| `tests/test_claims_adjudication.py` | 75 scenario tests covering validator, adjudicator, determiner, EOB/appeal guidance, CARC/RARC mapping, fraud/parity hooks, and batch flows. |
+
 ---
 
 ## 📐 Data Models & Schemas
@@ -233,19 +243,18 @@ docker compose up --build
 
 ## 🧪 Testing
 
-Full suite (103 tests):
+Full suite (1045 tests):
 
 ```bash
-python -m pytest medi_comply/tests/test_golden_suite.py \
-							 medi_comply/tests/test_end_to_end.py -v
+python -m pytest medi_comply/tests/ -v
 ```
 
-Focused runs:
+Targeted runs:
 
 ```bash
+python -m pytest medi_comply/tests/test_claims_adjudication.py -v
+python -m pytest medi_comply/tests/test_fraud_detector.py -k upcoding_mi_overcoding -v
 python -m pytest medi_comply/tests/test_core.py -v
-python -m pytest medi_comply/tests/test_guardrails.py -v
-python -m pytest medi_comply/tests/test_retrieval.py -v
 ```
 
 Coverage / debugging aids:
@@ -254,7 +263,7 @@ Coverage / debugging aids:
 python -m pytest medi_comply/tests/ --cov=medi_comply --cov-report=html
 ```
 
-`run_demo.py --tests-only` automates the golden suite prior to live demos.
+`run_demo.py --tests-only` still automates the golden suite prior to live demos.
 
 ---
 
@@ -294,7 +303,7 @@ python -m pytest medi_comply/tests/ --cov=medi_comply --cov-report=html
 │ guardrails/        │   7     │   1,000+   |
 │ audit/             │   9     │   2,300+   |
 │ schemas/           │  10     │   1,000+   |
-│ tests/             │   8     │   1,600+   |
+│ tests/             │   8     │   3,000+   |
 ├────────────────────┼─────────┼────────────┤
 │ TOTAL              │  77     │  ~13,000+  |
 └────────────────────┴─────────┴────────────┘
@@ -303,7 +312,7 @@ python -m pytest medi_comply/tests/ --cov=medi_comply --cov-report=html
 - **ICD-10 Codes Seeded:** 3,000+
 - **CPT Codes Seeded:** 500+
 - **Compliance Checks:** 23
-- **Automated Tests:** 103 (golden suite + e2e)
+- **Automated Tests:** 1045 (full suite incl. claims adjudication)
 
 ---
 

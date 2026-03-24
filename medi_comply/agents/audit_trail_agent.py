@@ -103,6 +103,10 @@ class AuditTrailAgent(BaseAgent):
         retry_history = message.payload.get("retry_history", [])
         stage_timings = message.payload.get("stage_timings", {})
         llm_interactions = message.payload.get("llm_interactions", [])
+        regulatory_validation = message.payload.get("regulatory_validation")
+        code_set_versions = message.payload.get("code_set_versions")
+        fiscal_year = message.payload.get("fiscal_year")
+        knowledge_base_version = message.payload.get("knowledge_base_version")
 
         # Compile the full audit record
         trace, report, ev_map, risk = self.compile_audit_record(
@@ -115,6 +119,10 @@ class AuditTrailAgent(BaseAgent):
             retry_history,
             stage_timings,
             llm_interactions,
+            regulatory_validation,
+            code_set_versions,
+            fiscal_year,
+            knowledge_base_version,
         )
 
         # Persist the trace in the immutable store when we actually have one
@@ -160,6 +168,10 @@ class AuditTrailAgent(BaseAgent):
         retry_history: Optional[list] = None,
         stage_timings: Optional[dict] = None,
         llm_interactions: Optional[list] = None,
+        regulatory_validation: Optional[dict] = None,
+        code_set_versions: Optional[dict] = None,
+        fiscal_year: Optional[str] = None,
+        knowledge_base_version: Optional[str] = None,
     ) -> tuple[WorkflowTrace, AuditReport, EvidenceMap, AuditRiskAssessment]:
         """Compile a complete audit record from pipeline outputs.
 
@@ -241,7 +253,21 @@ class AuditTrailAgent(BaseAgent):
             for llm in llm_interactions:
                 tb.record_llm_interaction(**llm)
 
-        trace = tb.build_trace(coding_result) if coding_result else None
+        trace = None
+        if coding_result:
+            kb_version = knowledge_base_version
+            if not kb_version:
+                if retrieval_context and getattr(retrieval_context, "retrieval_summary", None):
+                    kb_version = retrieval_context.retrieval_summary.get("knowledge_version") or "1.0"
+                else:
+                    kb_version = "1.0"
+            config_payload = {
+                "regulatory_validation": regulatory_validation,
+                "code_set_versions": code_set_versions,
+                "fiscal_year": fiscal_year,
+            }
+            config_payload = {k: v for k, v in config_payload.items() if v is not None}
+            trace = tb.build_trace(coding_result, knowledge_base_version=kb_version, config=config_payload)
 
         # Build the evidence map
         ev_map = None

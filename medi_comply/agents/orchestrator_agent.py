@@ -193,7 +193,7 @@ class OrchestratorAgent(BaseAgent):
             )
             response = await self.retrieval_agent.process(retrieval_message)
             payload = response.payload or {}
-            retrieval_context_data = payload.get("retrieval_context")
+            retrieval_context_data: Any = payload.get("retrieval_context")
             if retrieval_context_data is None and payload:
                 # Allow agents that return the context directly instead of nesting under "retrieval_context"
                 if "condition_candidates" in payload or "procedure_candidates" in payload:
@@ -201,15 +201,18 @@ class OrchestratorAgent(BaseAgent):
             if retrieval_context_data is None:
                 raise RuntimeError("Retrieval agent returned no context")
             if hasattr(retrieval_context_data, "condition_candidates"):
-                context.retrieval_context = retrieval_context_data
+                context.retrieval_context = retrieval_context_data  # type: ignore[assignment]
             else:
                 context.retrieval_context = CodeRetrievalContext.model_validate(retrieval_context_data)
+            retrieval_context = context.retrieval_context
+            if retrieval_context is None:
+                raise RuntimeError("Retrieval context missing after validation")
             context.record_stage_complete(
                 PipelineStage.RETRIEVAL,
                 "SUCCESS",
                 details={
-                    "condition_candidates": len(context.retrieval_context.condition_candidates),
-                    "procedure_candidates": len(context.retrieval_context.procedure_candidates),
+                    "condition_candidates": len(retrieval_context.condition_candidates),
+                    "procedure_candidates": len(retrieval_context.procedure_candidates),
                 },
             )
         except Exception as exc:
@@ -301,6 +304,10 @@ class OrchestratorAgent(BaseAgent):
                     "retry_history": [r.model_dump() for r in context.retry_history],
                     "stage_timings": context.stage_timings,
                     "llm_interactions": [i.model_dump() for i in context.llm_interactions],
+                    "regulatory_validation": context.patient_context.get("regulatory_validation") if context.patient_context else None,
+                    "code_set_versions": context.patient_context.get("code_set_versions") if context.patient_context else None,
+                    "fiscal_year": context.patient_context.get("fiscal_year") if context.patient_context else None,
+                    "knowledge_base_version": context.patient_context.get("knowledge_base_version") if context.patient_context else None,
                 },
                 trace_id=context.trace_id,
             )
@@ -356,6 +363,10 @@ class OrchestratorAgent(BaseAgent):
         )
         total_time_ms = max(context.get_processing_time_ms(), 1.0)
 
+        code_set_versions = context.patient_context.get("code_set_versions", {}) if context.patient_context else {}
+        regulatory_validation = context.patient_context.get("regulatory_validation") if context.patient_context else None
+        knowledge_base_version = metrics.knowledge_base_version if hasattr(metrics, "knowledge_base_version") else "UNKNOWN"
+
         return MediComplyResult(
             result_id=str(uuid4()),
             trace_id=context.trace_id,
@@ -377,6 +388,9 @@ class OrchestratorAgent(BaseAgent):
             errors=context.errors,
             warnings=context.warnings,
             metrics=metrics,
+            knowledge_base_version=knowledge_base_version,
+            code_set_versions=code_set_versions,
+            regulatory_validation=regulatory_validation,
         )
 
     def _determine_escalation_reason(self, context: PipelineContext) -> str:
@@ -418,9 +432,9 @@ class OrchestratorAgent(BaseAgent):
             raise RuntimeError("Structured clinical representation missing prior to retrieval")
         if isinstance(scr, dict):
             return scr
-        if is_dataclass(scr):
+        if is_dataclass(scr) and not isinstance(scr, type):
             return asdict(scr)
-        if hasattr(scr, "model_dump"):
+        if hasattr(scr, "model_dump") and not isinstance(scr, type):
             return scr.model_dump()
         if hasattr(scr, "__dict__"):
             return dict(scr.__dict__)

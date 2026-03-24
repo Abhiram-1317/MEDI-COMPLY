@@ -169,7 +169,7 @@ def _convert_compliance_report(report: Optional[ComplianceReport]) -> Optional[d
     return _safe_model_dump(report, default=None)
 
 
-def _convert_to_response(result: Optional[MediComplyResult]) -> dict[str, Any]:
+def _convert_to_response(result: Optional[Any]) -> dict[str, Any]:
     """Convert a MediComplyResult into a FastAPI-friendly payload."""
     if result is None:
         return {}

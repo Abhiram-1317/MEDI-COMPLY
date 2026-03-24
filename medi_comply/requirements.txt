@@ -37,6 +37,12 @@ redis
 sqlalchemy
 asyncpg
 
+# OCR Dependencies (optional — install for PDF/image processing)
+# pip install medi-comply[ocr] or install individually:
+pytesseract>=0.3.10    # Tesseract OCR wrapper
+pdf2image>=1.16.3      # PDF to image conversion for OCR
+Pillow>=10.0.0         # Image processing (may already be present)
+
 # Testing
 pytest
 pytest-asyncio

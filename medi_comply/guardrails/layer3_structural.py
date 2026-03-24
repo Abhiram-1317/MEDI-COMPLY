@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from medi_comply.core.utils import safe_get_code, safe_get_confidence
 from medi_comply.knowledge.knowledge_manager import KnowledgeManager
+from medi_comply.knowledge.lcd_ncd_engine import CoverageStatus
 from medi_comply.nlp.scr_builder import StructuredClinicalRepresentation
 from medi_comply.schemas.coding_result import CodingResult
 
@@ -49,6 +50,7 @@ class StructuralGuardrails:
         results.extend(self.check_10_mue(coding_result))
         results.extend(self.check_11_billable(coding_result))
         results.extend(self.check_12_use_additional_compliance(coding_result))
+        results.extend(self.check_14_medical_necessity_lcd_ncd(coding_result))
         results.append(self.check_13_confidence_threshold(coding_result))
         return results
 
@@ -64,11 +66,14 @@ class StructuralGuardrails:
         ref: Optional[str] = None,
         start: float = 0.0,
     ) -> StructuralCheckResult:
+        normalized_severity = severity
+        if passed and severity not in {"INFO", "WARNING"}:
+            normalized_severity = "NONE"
         return StructuralCheckResult(
             check_id=cid,
             check_name=name,
             passed=passed,
-            severity=severity if not passed else "NONE",
+            severity=normalized_severity,
             details=details,
             affected_codes=codes or [],
             fix_suggestion=fix,
@@ -553,6 +558,109 @@ class StructuralGuardrails:
                 True,
                 "NONE",
                 "Use Additional rules satisfied.",
+                start=start,
+            )
+        ]
+
+    def check_14_medical_necessity_lcd_ncd(self, coding_result: CodingResult) -> list[StructuralCheckResult]:
+        """CHECK 14: LCD/NCD-based medical necessity validation (Rule 3.7)."""
+
+        start = time.time()
+        results: list[StructuralCheckResult] = []
+
+        dx_codes = [code for c in coding_result.diagnosis_codes if (code := safe_get_code(c))]
+        if not dx_codes or not coding_result.procedure_codes:
+            return [
+                self._make_result(
+                    "CHECK_14_MEDICAL_NECESSITY_LCD_NCD",
+                    "MEDICAL_NECESSITY_LCD_NCD",
+                    True,
+                    "NONE",
+                    "No procedures or diagnoses to evaluate.",
+                    start=start,
+                )
+            ]
+
+        patient_state = getattr(coding_result, "patient_state", None)
+        clinical_info = getattr(coding_result, "clinical_info", None)
+
+        for proc in coding_result.procedure_codes:
+            cpt_code = safe_get_code(proc)
+            if not cpt_code:
+                continue
+
+            mn_result = self.km.lcd_ncd_engine.check_medical_necessity(
+                cpt_code=cpt_code,
+                icd10_codes=dx_codes,
+                patient_age=coding_result.patient_age,
+                patient_gender=coding_result.patient_gender,
+                state=patient_state,
+                clinical_info=clinical_info,
+            )
+
+            det_id = mn_result.determination_used.determination_id if mn_result.determination_used else "NONE"
+            detail_parts = [
+                f"CPT {cpt_code} coverage via {det_id}: {mn_result.coverage_status}",
+            ]
+            if mn_result.covered_diagnoses_found:
+                detail_parts.append(f"Covered dx present: {mn_result.covered_diagnoses_found}")
+            elif mn_result.determination_used and mn_result.determination_used.covered_icd10_codes:
+                detail_parts.append(
+                    f"Covered dx options: {mn_result.determination_used.covered_icd10_codes}"
+                )
+            if mn_result.non_covered_diagnoses_found:
+                detail_parts.append(f"Non-covered dx: {mn_result.non_covered_diagnoses_found}")
+            if mn_result.uncovered_diagnoses:
+                detail_parts.append(f"Uncovered submitted dx: {mn_result.uncovered_diagnoses}")
+            if mn_result.unmet_criteria:
+                detail_parts.append(f"Unmet criteria: {mn_result.unmet_criteria}")
+            if mn_result.missing_documentation:
+                detail_parts.append(f"Missing docs: {mn_result.missing_documentation}")
+            if mn_result.recommendations:
+                detail_parts.append(f"Recommendations: {mn_result.recommendations}")
+
+            details = "; ".join(detail_parts)
+            severity = "NONE"
+            passed = True
+            fix = None
+
+            if mn_result.coverage_status == CoverageStatus.CONDITIONAL:
+                passed = False
+                severity = "SOFT_FAIL"
+                fix = "; ".join(mn_result.recommendations) if mn_result.recommendations else None
+            elif mn_result.coverage_status == CoverageStatus.NOT_COVERED:
+                passed = False
+                severity = "HARD_FAIL"
+                fix = "; ".join(mn_result.recommendations) if mn_result.recommendations else None
+            elif mn_result.coverage_status == CoverageStatus.NOT_SPECIFIED:
+                passed = True
+                severity = "INFO"
+                details += "; No LCD/NCD found; assume general benefits."
+
+            results.append(
+                self._make_result(
+                    "CHECK_14_MEDICAL_NECESSITY_LCD_NCD",
+                    "MEDICAL_NECESSITY_LCD_NCD",
+                    passed,
+                    severity,
+                    details,
+                    [cpt_code],
+                    fix,
+                    det_id,
+                    start,
+                )
+            )
+
+        if results:
+            return results
+
+        return [
+            self._make_result(
+                "CHECK_14_MEDICAL_NECESSITY_LCD_NCD",
+                "MEDICAL_NECESSITY_LCD_NCD",
+                True,
+                "NONE",
+                "No medical necessity issues detected.",
                 start=start,
             )
         ]

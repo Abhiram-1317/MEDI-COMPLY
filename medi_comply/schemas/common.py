@@ -87,6 +87,7 @@ class AgentType(str, enum.Enum):
     OBSERVER = "OBSERVER"
     SAFETY_NET = "SAFETY_NET"
     RAG_SPECIALIST = "RAG_SPECIALIST"
+    PROCESSOR = "PROCESSOR"
 
 
 class ResponseStatus(str, enum.Enum):

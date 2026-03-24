@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
 
@@ -637,19 +637,19 @@ def _build_orchestrator(config: ScenarioConfig) -> OrchestratorAgent:
     dummy_km = SimpleNamespace(is_initialized=True, vector_store=SimpleNamespace(is_initialized=True))
     settings = Settings()
     orchestrator = OrchestratorAgent(
-        knowledge_manager=dummy_km,
+        knowledge_manager=cast(Any, dummy_km),
         config=settings,
         llm_client=None,
-        audit_agent=StubAuditAgent(config),
-        nlp_pipeline=StubNlpPipeline(config),
-        retrieval_agent=StubRetrievalAgent(config),
-        coding_agent=StubCodingAgent(),
-        compliance_agent=StubComplianceAgent(),
-        retry_controller=StubRetryController(config),
+        audit_agent=cast(Any, StubAuditAgent(config)),
+        nlp_pipeline=cast(Any, StubNlpPipeline(config)),
+        retrieval_agent=cast(Any, StubRetrievalAgent(config)),
+        coding_agent=cast(Any, StubCodingAgent()),
+        compliance_agent=cast(Any, StubComplianceAgent()),
+        retry_controller=cast(Any, StubRetryController(config)),
         metrics_collector=PipelineMetricsCollector(),
-        escalation_agent=StubEscalationAgent(config),
+        escalation_agent=cast(Any, StubEscalationAgent(config)),
     )
-    orchestrator._ingester = StubIngester(config)
+    orchestrator._ingester = cast(Any, StubIngester(config))
     return orchestrator
 
 
@@ -765,6 +765,7 @@ async def test_pipeline_audit_artifacts_preserved(scenario_key: str, expect_audi
 async def test_pipeline_metrics_summary(scenario_key: str) -> None:
     result = await run_scenario(scenario_key)
     metrics = result.metrics
+    assert result.coding_result is not None
     expected_codes = len(result.coding_result.diagnosis_codes) + len(result.coding_result.procedure_codes)
     assert metrics.codes_assigned == expected_codes
     assert metrics.retry_count == result.retry_count

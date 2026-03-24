@@ -15,8 +15,34 @@ from medi_comply.knowledge.icd10_db import ICD10CodeEntry, ICD10Database, Valida
 from medi_comply.knowledge.cpt_db import CPTCodeEntry, CPTDatabase
 from medi_comply.knowledge.ncci_engine import MUECheckResult, NCCICheckResult, NCCIEngine
 from medi_comply.knowledge.medical_necessity import MedicalNecessityEngine, MedNecessityResult
-from medi_comply.knowledge.coding_guidelines import CodingGuideline, CodingGuidelinesStore
+from medi_comply.knowledge.lcd_ncd_engine import (
+    LCDNCDEngine,
+    LCDNCDDatabase,
+    MedicalNecessityResult as LCDMedicalNecessityResult,
+    seed_lcd_ncd_data,
+)
+from medi_comply.knowledge.coding_guidelines import (
+    CodingGuideline,
+    CodingGuidelinesDatabase,
+    CodingGuidelinesEngine,
+    GuidelineComplianceResult,
+    GuidelineLookupResult,
+    CodingGuidelinesStore,
+    seed_coding_guidelines,
+)
 from medi_comply.knowledge.vector_store import CodeSearchResult, GuidelineSearchResult, MedicalVectorStore
+from medi_comply.knowledge.knowledge_updater import KnowledgeUpdater, KnowledgeVersion, UpdateSource
+from medi_comply.knowledge.payer_policy_engine import (
+    AuthRequirement,
+    AuthRequirementRule,
+    CoveredServiceRule,
+    MemberCostSharing,
+    PayerClaimCheckResult,
+    PayerPolicyDatabase,
+    PayerPolicyEngine,
+    ServiceCategory,
+    seed_payer_policies,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +69,31 @@ class ExcludesCheckResult:
         self.message = message
 
 
+class _LegacyGuidelineAdapter:
+    """Compatibility shim exposing legacy guideline store API."""
+
+    def __init__(self, db: CodingGuidelinesDatabase, engine: CodingGuidelinesEngine) -> None:
+        self._db = db
+        self._engine = engine
+        self._guidelines = {g.guideline_id: g for g in db.get_all_guidelines()}
+
+    def get_guideline(self, guideline_id: str) -> Optional[CodingGuideline]:
+        return self._db.get_guideline(guideline_id)
+
+    def search_guidelines(self, keywords: list[str]) -> list[CodingGuideline]:
+        return self._db.search(" ".join(keywords))
+
+    def get_guidelines_for_code(self, icd10_code: str) -> list[CodingGuideline]:
+        return self._db.find_by_icd10_code(icd10_code)
+
+    @property
+    def guideline_count(self) -> int:
+        return self._db.get_guideline_count()
+
+    def generate_citation(self, guideline_id: str) -> str:
+        return self._engine.format_guideline_citation(guideline_id)
+
+
 # ---------------------------------------------------------------------------
 # Knowledge Manager
 # ---------------------------------------------------------------------------
@@ -63,8 +114,21 @@ class KnowledgeManager:
         self.cpt_db: CPTDatabase = CPTDatabase()
         self.ncci_engine: NCCIEngine = NCCIEngine()
         self.med_necessity: MedicalNecessityEngine = MedicalNecessityEngine()
-        self.guidelines: CodingGuidelinesStore = CodingGuidelinesStore()
+        self.lcd_ncd_db: LCDNCDDatabase = LCDNCDDatabase()
+        seed_lcd_ncd_data(self.lcd_ncd_db)
+        self.lcd_ncd_engine: LCDNCDEngine = LCDNCDEngine(database=self.lcd_ncd_db)
+        self.payer_policy_db: PayerPolicyDatabase = PayerPolicyDatabase()
+        seed_payer_policies(self.payer_policy_db)
+        self.payer_policy_engine: PayerPolicyEngine = PayerPolicyEngine(database=self.payer_policy_db)
+        self.coding_guidelines_db: CodingGuidelinesDatabase = CodingGuidelinesDatabase()
+        seed_coding_guidelines(self.coding_guidelines_db)
+        self.coding_guidelines_engine: CodingGuidelinesEngine = CodingGuidelinesEngine(database=self.coding_guidelines_db)
+        self.guidelines: _LegacyGuidelineAdapter = _LegacyGuidelineAdapter(self.coding_guidelines_db, self.coding_guidelines_engine)
         self.vector_store: MedicalVectorStore = MedicalVectorStore()
+        # Knowledge updater manages versioned KB updates with staging and rollback
+        self.knowledge_updater: KnowledgeUpdater = KnowledgeUpdater(self)
+        self.current_version: KnowledgeVersion = self.knowledge_updater.current_version
+        self.current_version_id: str = self.current_version.version_id
         self._initialized: bool = False
         self._last_updated: Optional[datetime] = None
 
@@ -89,7 +153,8 @@ class KnowledgeManager:
             "ncci_pairs": self.ncci_engine.edit_pair_count,
             "mue": self.ncci_engine.mue_count,
             "lcd": self.med_necessity.lcd_count,
-            "guidelines": self.guidelines.guideline_count,
+            "lcd_ncd": self.lcd_ncd_db.get_determination_count(),
+            "guidelines": self.coding_guidelines_db.get_guideline_count(),
         }
 
     # -- Initialization ----------------------------------------------------
@@ -139,10 +204,8 @@ class KnowledgeManager:
 
         # Guidelines
         guideline_docs = []
-        for gid in list(self.guidelines._guidelines.keys()):
-            g = self.guidelines.get_guideline(gid)
-            if g:
-                guideline_docs.append(g.to_dict())
+        for g in self.coding_guidelines_db.get_all_guidelines():
+            guideline_docs.append(g.model_dump())
         self.vector_store.add_guidelines(guideline_docs)
 
     # -- ICD-10 Lookups ----------------------------------------------------
@@ -293,8 +356,8 @@ class KnowledgeManager:
         self,
         cpt_code: str,
         dx_codes: list[str],
-    ) -> MedNecessityResult:
-        """Check whether a procedure is medically necessary.
+    ) -> LCDMedicalNecessityResult:
+        """Check whether a procedure is medically necessary (LCD/NCD).
 
         Parameters
         ----------
@@ -305,9 +368,169 @@ class KnowledgeManager:
 
         Returns
         -------
-        MedNecessityResult
+        LCDMedicalNecessityResult
         """
-        return self.med_necessity.check_medical_necessity(cpt_code, dx_codes)
+        return self.lcd_ncd_engine.check_medical_necessity(
+            cpt_code=cpt_code,
+            icd10_codes=dx_codes,
+        )
+
+    def check_lcd_ncd_medical_necessity(
+        self,
+        cpt_code: str,
+        icd10_codes: list[str],
+        patient_age: Optional[int] = None,
+        patient_gender: Optional[str] = None,
+        state: Optional[str] = None,
+        clinical_info: Optional[dict] = None,
+    ) -> LCDMedicalNecessityResult:
+        """LCD/NCD-based medical necessity evaluation.
+
+        Delegates to :class:`LCDNCDEngine` for coverage determinations. This is
+        the preferred path for agents that need detailed coverage reasoning,
+        recommendations, and policy-aware checks (age, gender, frequency).
+        """
+
+        return self.lcd_ncd_engine.check_medical_necessity(
+            cpt_code=cpt_code,
+            icd10_codes=icd10_codes,
+            patient_age=patient_age,
+            patient_gender=patient_gender,
+            state=state,
+            clinical_info=clinical_info,
+        )
+
+    def get_covered_diagnoses(self, cpt_code: str, state: Optional[str] = None) -> list[str]:
+        """List ICD-10 codes that establish necessity for a CPT (LCD/NCD)."""
+
+        return self.lcd_ncd_engine.get_covered_diagnoses(cpt_code, state)
+
+    def get_documentation_requirements(self, cpt_code: str) -> list[str]:
+        """Documentation required by LCD/NCD for a CPT."""
+
+        return self.lcd_ncd_engine.get_required_documentation(cpt_code)
+
+    def is_procedure_covered(self, cpt_code: str, icd10_code: str, state: Optional[str] = None) -> bool:
+        """Boolean coverage check for a CPT/ICD pairing (LCD/NCD)."""
+
+        return self.lcd_ncd_engine.is_procedure_covered(cpt_code, icd10_code, state)
+
+    # -- Payer Policy Engine --------------------------------------------
+
+    def check_auth_requirement(
+        self,
+        payer_id: str,
+        cpt_code: str,
+        service_category: Optional[ServiceCategory] = None,
+        is_emergency: bool = False,
+    ) -> AuthRequirementRule:
+        """Payer-specific prior authorization requirement lookup."""
+
+        return self.payer_policy_engine.check_auth_requirement(
+            payer_id=payer_id,
+            cpt_code=cpt_code,
+            service_category=service_category,
+            is_emergency=is_emergency,
+        )
+
+    def check_payer_coverage(
+        self,
+        payer_id: str,
+        cpt_code: str,
+        icd10_codes: list[str],
+        patient_age: Optional[int] = None,
+        patient_gender: Optional[str] = None,
+        place_of_service: Optional[str] = None,
+    ) -> CoveredServiceRule:
+        """Check payer coverage constraints for a CPT/ICD combination."""
+
+        return self.payer_policy_engine.check_coverage(
+            payer_id=payer_id,
+            cpt_code=cpt_code,
+            icd10_codes=icd10_codes,
+            patient_age=patient_age,
+            patient_gender=patient_gender,
+            place_of_service=place_of_service,
+        )
+
+    def get_allowed_amount(
+        self,
+        payer_id: str,
+        cpt_code: str,
+        modifier: Optional[str] = None,
+        is_facility: bool = False,
+    ) -> Optional[float]:
+        """Return payer allowed amount for a CPT code with modifier context."""
+
+        return self.payer_policy_engine.get_allowed_amount(
+            payer_id=payer_id,
+            cpt_code=cpt_code,
+            modifier=modifier,
+            is_facility=is_facility,
+        )
+
+    def calculate_member_cost(
+        self,
+        payer_id: str,
+        cpt_code: str,
+        is_in_network: bool,
+        deductible_met: bool = False,
+    ) -> MemberCostSharing:
+        """Estimate member cost sharing for a CPT code under a payer plan."""
+
+        return self.payer_policy_engine.calculate_member_responsibility(
+            payer_id=payer_id,
+            cpt_code=cpt_code,
+            is_in_network=is_in_network,
+            deductible_met=deductible_met,
+        )
+
+    def check_timely_filing(self, payer_id: str, date_of_service: str, submission_date: str) -> bool:
+        """Verify timely filing compliance for the payer."""
+
+        return self.payer_policy_engine.check_timely_filing(
+            payer_id=payer_id,
+            date_of_service=date_of_service,
+            submission_date=submission_date,
+        )
+
+    def run_payer_claim_check(
+        self,
+        payer_id: str,
+        cpt_code: str,
+        icd10_codes: list[str],
+        date_of_service: str,
+        submission_date: Optional[str] = None,
+        patient_age: Optional[int] = None,
+        patient_gender: Optional[str] = None,
+        place_of_service: Optional[str] = None,
+        is_in_network: bool = True,
+        auth_on_file: Optional[bool] = None,
+    ) -> PayerClaimCheckResult:
+        """Run comprehensive payer policy checks for a claim line."""
+
+        return self.payer_policy_engine.run_payer_claim_check(
+            payer_id=payer_id,
+            cpt_code=cpt_code,
+            icd10_codes=icd10_codes,
+            date_of_service=date_of_service,
+            submission_date=submission_date,
+            patient_age=patient_age,
+            patient_gender=patient_gender,
+            place_of_service=place_of_service,
+            is_in_network=is_in_network,
+            auth_on_file=auth_on_file,
+        )
+
+    def get_auth_matrix(self, payer_id: str) -> dict[str, AuthRequirement]:
+        """Return CPT → auth requirement mapping for a payer."""
+
+        return self.payer_policy_engine.get_auth_matrix(payer_id)
+
+    def get_appeal_info(self, payer_id: str) -> dict:
+        """Return appeal timelines and levels for a payer."""
+
+        return self.payer_policy_engine.get_appeal_info(payer_id)
 
     # -- Coding Guidelines -------------------------------------------------
 
@@ -334,18 +557,78 @@ class KnowledgeManager:
 
         if codes:
             for code in codes:
-                for g in self.guidelines.get_guidelines_for_code(code):
+                for g in self.coding_guidelines_db.find_by_icd10_code(code):
                     if g.guideline_id not in seen:
                         results.append(g)
                         seen.add(g.guideline_id)
 
         if keywords:
-            for g in self.guidelines.search_guidelines(keywords):
+            query = " ".join(keywords)
+            for g in self.coding_guidelines_db.search(query):
                 if g.guideline_id not in seen:
                     results.append(g)
                     seen.add(g.guideline_id)
 
         return results
+
+    # -- Official Coding Guidelines --------------------------------------
+
+    def get_applicable_guidelines(
+        self,
+        icd10_codes: list[str],
+        encounter_type: str,
+        clinical_context: Optional[dict] = None,
+    ) -> GuidelineLookupResult:
+        """Retrieve applicable OCG guidelines for codes and encounter type."""
+
+        return self.coding_guidelines_engine.get_applicable_guidelines(
+            icd10_codes=icd10_codes,
+            encounter_type=EncounterType(encounter_type),
+            clinical_context=clinical_context,
+        )
+
+    def check_guideline_compliance(
+        self,
+        icd10_codes: list[str],
+        encounter_type: str,
+        primary_dx: Optional[str] = None,
+        patient_age: Optional[int] = None,
+        patient_gender: Optional[str] = None,
+    ) -> GuidelineComplianceResult:
+        """Evaluate coding compliance against Official Coding Guidelines."""
+
+        return self.coding_guidelines_engine.check_compliance(
+            icd10_codes=icd10_codes,
+            encounter_type=EncounterType(encounter_type),
+            primary_dx=primary_dx,
+            patient_age=patient_age,
+            patient_gender=patient_gender,
+        )
+
+    def get_sequencing_rules(self, icd10_codes: list[str], encounter_type: str) -> dict:
+        """Get sequencing guidance for provided codes and encounter."""
+
+        return self.coding_guidelines_engine.get_sequencing_rules(icd10_codes, EncounterType(encounter_type))
+
+    def get_combination_guidance(self, conditions: list[str]) -> dict:
+        """Return combination-code guidance for condition list."""
+
+        return self.coding_guidelines_engine.get_combination_guidance(conditions)
+
+    def get_uncertain_diagnosis_rule(self, encounter_type: str) -> Optional[CodingGuideline]:
+        """Return uncertain-diagnosis guideline for encounter type."""
+
+        return self.coding_guidelines_engine.get_uncertain_diagnosis_rule(EncounterType(encounter_type))
+
+    def format_guideline_citation(self, guideline_id: str) -> str:
+        """Format guideline citation for reasoning chains."""
+
+        return self.coding_guidelines_engine.format_guideline_citation(guideline_id)
+
+    def get_coding_tips(self, icd10_code: str) -> list[str]:
+        """Return practical coding tips for an ICD-10 code."""
+
+        return self.coding_guidelines_engine.get_coding_tips(icd10_code)
 
     # -- Vector Search -----------------------------------------------------
 
@@ -432,9 +715,64 @@ class KnowledgeManager:
 
     # -- Version -----------------------------------------------------------
 
-    def get_knowledge_version(self) -> str:
-        """Return the knowledge base version string."""
+    def get_knowledge_version(self, as_record: bool = False):
+        """Return the active knowledge base version.
+
+        Parameters
+        ----------
+        as_record:
+            When True, return the full :class:`KnowledgeVersion` record. When False,
+            return a legacy semantic version string for backward compatibility.
+        """
+
+        if as_record:
+            return self.knowledge_updater.current_version
+
+        current = self.knowledge_updater.current_version
+        if hasattr(current, "metadata"):
+            semantic = current.metadata.get("semantic_version")
+            legacy = current.metadata.get("legacy_version")
+            if semantic:
+                return str(semantic)
+            if legacy:
+                return str(legacy)
+
+        # Fallback to static semantic version for compatibility with existing tests/clients
         return self.VERSION
+
+    def get_knowledge_version_history(self) -> list[KnowledgeVersion]:
+        """Return all knowledge base versions (active and historical)."""
+
+        return self.knowledge_updater.get_version_history()
+
+    async def check_for_knowledge_updates(self) -> list[dict]:
+        """Check configured feeds for available knowledge updates."""
+
+        return await self.knowledge_updater.check_for_updates()
+
+    async def apply_knowledge_update(self, update_data: dict, source: UpdateSource) -> KnowledgeVersion:
+        """Run the 8-step update protocol for provided update data."""
+
+        version = await self.knowledge_updater.process_update(update_data, source)
+        # Update cached version identifiers for audit traceability
+        self.current_version = self.knowledge_updater.current_version
+        self.current_version_id = self.current_version.version_id
+        return version
+
+    def approve_knowledge_update(self, version_id: str, approved_by: str) -> bool:
+        """Approve a pending human-review update and promote it."""
+
+        return self.knowledge_updater.approve_update(version_id, approved_by)
+
+    def rollback_knowledge(self, version_id: str, reason: str) -> bool:
+        """Rollback to a previous knowledge base version."""
+
+        return self.knowledge_updater.rollback(version_id, reason)
+
+    def get_feed_status(self) -> list[dict]:
+        """Return status for all configured knowledge update feeds."""
+
+        return self.knowledge_updater.get_feed_status()
 
     def __repr__(self) -> str:
         return (

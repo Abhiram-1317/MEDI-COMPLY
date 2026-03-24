@@ -110,3 +110,8 @@ class MediComplyResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
     metrics: PipelineMetrics
+
+    # Regulatory + version metadata
+    knowledge_base_version: str = "UNKNOWN"
+    code_set_versions: Dict[str, str] = Field(default_factory=dict)
+    regulatory_validation: Optional[Dict[str, Any]] = None
